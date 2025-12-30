@@ -1,4 +1,4 @@
-# MCP Proxy
+# emceepee
 
 An MCP (Model Context Protocol) proxy server that provides a static tool interface for dynamically managing and interacting with multiple backend MCP servers.
 
@@ -8,7 +8,7 @@ Claude's tool schema is injected at conversation start and doesn't update mid-co
 
 ## Solution
 
-MCP Proxy provides a **static set of meta-tools** that allow Claude to:
+emceepee provides a **static set of meta-tools** that allow Claude to:
 
 - Dynamically add/remove backend MCP servers at runtime
 - Discover tools, resources, and prompts from any connected backend
@@ -18,9 +18,9 @@ MCP Proxy provides a **static set of meta-tools** that allow Claude to:
 ## Installation
 
 ```bash
-npm install mcp-proxy
+npm install emceepee
 # or
-bun add mcp-proxy
+bun add emceepee
 ```
 
 ## Usage
@@ -29,13 +29,13 @@ bun add mcp-proxy
 
 ```bash
 # Default port 8080
-npx mcp-proxy
+npx emceepee
 
 # Custom port
-PORT=9000 npx mcp-proxy
+PORT=9000 npx emceepee
 
 # With initial backend servers
-npx mcp-proxy --config ./servers.json
+npx emceepee --config ./servers.json
 ```
 
 ### Configuration File
@@ -85,7 +85,7 @@ execute_tool("execute_tool", {
 
 ```
 ┌─────────┐     ┌───────────┐     ┌─────────────────┐
-│  Claude │────▶│ MCP Proxy │────▶│ Backend MCP     │
+│  Claude │────▶│ emceepee  │────▶│ Backend MCP     │
 │         │     │           │     │ Server 1        │
 │         │     │ Static    │     └─────────────────┘
 │         │◀────│ Tools     │────▶┌─────────────────┐

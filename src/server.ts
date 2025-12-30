@@ -47,7 +47,7 @@ function loadConfig(path: string): ProxyConfig {
 // Create and configure the MCP server
 function createMcpServer(registry: ServerRegistry): McpServer {
   const server = new McpServer({
-    name: "mcp-proxy",
+    name: "emceepee",
     version: "0.1.0",
   });
 

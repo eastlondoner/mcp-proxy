@@ -1,13 +1,13 @@
 {
-  "name": "vibe-tools-mcp",
-  "version": "0.2.0",
+  "name": "emceepee",
+  "version": "0.2.1",
   "description": "MCP proxy server with static tools for managing dynamic backend MCP servers",
   "type": "module",
   "bin": {
-    "mcp-proxy": "dist/mcp-proxy.js"
+    "emceepee": "dist/emceepee.js"
   },
   "files": [
-    "dist/mcp-proxy.js",
+    "dist/emceepee.js",
     "README.md",
     "LICENSE"
   ],
@@ -16,7 +16,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/eastlondoner/mcp-proxy.git"
+    "url": "git+https://github.com/eastlondoner/emceepee.git"
   },
   "author": "eastlondoner",
   "license": "MIT",
@@ -30,8 +30,8 @@
     "cli"
   ],
   "scripts": {
-    "build": "bun build src/server.ts --outfile=dist/mcp-proxy.js --target=node --minify",
-    "start": "node dist/mcp-proxy.js",
+    "build": "bun build src/server.ts --outfile=dist/emceepee.js --target=node --minify",
+    "start": "node dist/emceepee.js",
     "dev": "bun run src/server.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",

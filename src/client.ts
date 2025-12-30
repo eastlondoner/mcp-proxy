@@ -161,7 +161,7 @@ export class MCPHttpClient {
       // Create the client with capabilities for receiving server requests
       this.client = new Client(
         {
-          name: "mcp-proxy",
+          name: "emceepee",
           version: "0.1.0",
         },
         {

@@ -1,4 +1,4 @@
-# MCP Proxy Server
+# emceepee
 
 An MCP proxy server with static tools for managing dynamic backend MCP servers.
 
@@ -65,7 +65,7 @@ Uses typescript-eslint with strict and stylistic rules:
 ## Project Structure
 
 ```
-mcp-proxy/
+emceepee/
 ├── src/
 │   ├── server.ts      # Main HTTP MCP server with static tools
 │   ├── registry.ts    # Backend server connection manager

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "emceepee": {
+      "type": "http",
+      "url": "http://localhost:8081/mcp"
+    },
+    "dynamic-tools-repro": {
+      "type": "http",
+      "url": "http://localhost:3002/mcp"
+    }
+  }
+}
