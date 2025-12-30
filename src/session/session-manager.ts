@@ -1,0 +1,498 @@
+/**
+ * Session Manager
+ *
+ * Central manager for all client sessions. Handles:
+ * - Session lifecycle (create, get, touch, destroy)
+ * - Server configuration (add, remove, list - global)
+ * - Backend connections (per-session)
+ * - Session timeout cleanup
+ * - Graceful shutdown
+ */
+
+import { ulid } from "ulid";
+import type { StructuredLogger } from "../logging.js";
+import {
+  ServerConfigRegistry,
+  type ServerConfig,
+  type ServerConfigRegistryOptions,
+} from "./server-config.js";
+import {
+  SessionState,
+  type SessionStateConfig,
+  type BackendConnection,
+} from "./session-state.js";
+import { MCPHttpClient } from "../client.js";
+import type { ServerInfo } from "../types.js";
+
+/**
+ * Configuration for SessionManager
+ */
+export interface SessionManagerConfig {
+  /** Session timeout in ms (default: 30 minutes) */
+  sessionTimeoutMs: number;
+  /** Cleanup interval in ms (default: 5 minutes) */
+  cleanupIntervalMs: number;
+  /** Configuration for new sessions */
+  sessionStateConfig?: SessionStateConfig;
+  /** Logger for structured logging */
+  logger?: StructuredLogger;
+}
+
+const DEFAULT_CONFIG: SessionManagerConfig = {
+  sessionTimeoutMs: 30 * 60 * 1000, // 30 minutes
+  cleanupIntervalMs: 5 * 60 * 1000, // 5 minutes
+};
+
+/**
+ * Central manager for all MCP proxy sessions.
+ *
+ * Key responsibilities:
+ * - Session lifecycle management
+ * - Shared server configuration registry
+ * - Per-session backend connection coordination
+ * - Automatic session timeout cleanup
+ */
+export class SessionManager {
+  private readonly sessions = new Map<string, SessionState>();
+  private readonly serverConfigs: ServerConfigRegistry;
+  private readonly config: SessionManagerConfig;
+  private readonly logger?: StructuredLogger;
+  private cleanupIntervalHandle: NodeJS.Timeout | null = null;
+
+  constructor(config: Partial<SessionManagerConfig> = {}) {
+    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.logger = config.logger;
+
+    const registryOptions: ServerConfigRegistryOptions = { logger: config.logger };
+    this.serverConfigs = new ServerConfigRegistry(registryOptions);
+
+    this.startCleanupInterval();
+  }
+
+  // ==================== Session Lifecycle ====================
+
+  /**
+   * Create a new session and auto-connect to all configured servers.
+   * Each session gets its own EventSystem instance.
+   */
+  public async createSession(): Promise<SessionState> {
+    const sessionId = ulid();
+    const session = new SessionState(
+      sessionId,
+      this.config.sessionStateConfig,
+      this.logger
+    );
+
+    this.sessions.set(sessionId, session);
+    this.logger?.info("session_created", { sessionId });
+
+    // Auto-connect to all configured servers
+    const configs = this.serverConfigs.listConfigs();
+    for (const serverConfig of configs) {
+      try {
+        await this.connectSessionToServer(session, serverConfig);
+      } catch (err) {
+        // Log but don't fail session creation
+        this.logger?.warn("session_auto_connect_failed", {
+          sessionId,
+          server: serverConfig.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    return session;
+  }
+
+  /**
+   * Get an existing session by ID.
+   */
+  public getSession(sessionId: string): SessionState | undefined {
+    return this.sessions.get(sessionId);
+  }
+
+  /**
+   * Touch a session (update last activity time).
+   */
+  public touchSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    session?.touch();
+  }
+
+  /**
+   * Destroy a session and clean up all its resources.
+   */
+  public async destroySession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    this.logger?.info("session_destroying", { sessionId });
+
+    await session.cleanup();
+    this.sessions.delete(sessionId);
+
+    this.logger?.info("session_destroyed", { sessionId });
+  }
+
+  // ==================== Server Configuration (Global) ====================
+
+  /**
+   * Add a server configuration and connect the calling session.
+   * The server config is shared globally; other sessions can connect later.
+   *
+   * @returns Connection info including capabilities
+   */
+  public async addServer(
+    sessionId: string,
+    name: string,
+    url: string
+  ): Promise<BackendConnection> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session '${sessionId}' not found`);
+    }
+
+    // 1. Add to global config registry
+    const isNew = this.serverConfigs.addConfig(name, url, sessionId);
+
+    // 2. Connect THIS session to the server
+    const serverConfig = this.serverConfigs.getConfig(name);
+    if (!serverConfig) {
+      throw new Error(`Failed to add server config for '${name}'`);
+    }
+    const connection = await this.connectSessionToServer(session, serverConfig);
+
+    // 3. Broadcast server_added event to all OTHER sessions
+    if (isNew) {
+      for (const [otherId, otherSession] of this.sessions) {
+        if (otherId !== sessionId) {
+          otherSession.eventSystem.addEvent("server_added", name, {
+            name,
+            url,
+            addedBy: sessionId,
+          });
+        }
+      }
+    }
+
+    return connection;
+  }
+
+  /**
+   * Remove a server configuration globally.
+   * Disconnects all sessions from this server.
+   */
+  public async removeServer(sessionId: string, name: string): Promise<void> {
+    // 1. Remove from global config registry
+    const existed = this.serverConfigs.removeConfig(name);
+    if (!existed) {
+      throw new Error(`Server '${name}' not found`);
+    }
+
+    // 2. Disconnect ALL sessions from this server
+    for (const [, session] of this.sessions) {
+      await this.disconnectSessionFromServer(session, name);
+
+      // Emit server_removed event to this session's EventSystem
+      session.eventSystem.addEvent("server_removed", name, {
+        name,
+        removedBy: sessionId,
+      });
+    }
+  }
+
+  /**
+   * List all configured servers with connection status for a session.
+   */
+  public listServers(sessionId: string): ServerInfo[] {
+    const session = this.sessions.get(sessionId);
+    const configs = this.serverConfigs.listConfigs();
+
+    return configs.map((serverConfig) => {
+      const connection = session?.getConnection(serverConfig.name);
+      return {
+        name: serverConfig.name,
+        url: serverConfig.url,
+        connected: connection?.status === "connected",
+        status: connection?.status ?? "not_connected",
+        connectedAt: connection?.connectedAt,
+        lastError: connection?.lastError,
+      };
+    });
+  }
+
+  // ==================== Backend Connection Management ====================
+
+  /**
+   * Get or create a backend connection for a session.
+   * Used by execute_tool and other tools that need backend access.
+   */
+  public async getOrCreateConnection(
+    sessionId: string,
+    serverName: string
+  ): Promise<MCPHttpClient> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session '${sessionId}' not found`);
+    }
+
+    // Check existing connection
+    const existing = session.getConnection(serverName);
+    if (existing?.status === "connected") {
+      return existing.client;
+    }
+
+    // Get config
+    const serverConfig = this.serverConfigs.getConfig(serverName);
+    if (!serverConfig) {
+      throw new Error(`Server '${serverName}' not found`);
+    }
+
+    // Connect (or reconnect)
+    const connection = await this.connectSessionToServer(session, serverConfig);
+    return connection.client;
+  }
+
+  /**
+   * Get an existing connected client for a session.
+   * Returns undefined if not connected.
+   */
+  public getConnectedClient(
+    sessionId: string,
+    serverName: string
+  ): MCPHttpClient | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+
+    const connection = session.getConnection(serverName);
+    if (connection?.status === "connected") {
+      return connection.client;
+    }
+    return undefined;
+  }
+
+  /**
+   * Connect a session to a server.
+   */
+  private async connectSessionToServer(
+    session: SessionState,
+    serverConfig: ServerConfig
+  ): Promise<BackendConnection> {
+    // Check if already connecting/connected
+    const existing = session.backendConnections.get(serverConfig.name);
+    if (existing?.status === "connected") {
+      return existing;
+    }
+    if (existing?.status === "connecting") {
+      throw new Error(`Already connecting to '${serverConfig.name}'`);
+    }
+
+    // Create MCPHttpClient with session-specific callbacks
+    const client = new MCPHttpClient({
+      name: serverConfig.name,
+      url: serverConfig.url,
+      onStatusChange: (status, error): void => {
+        session.setConnectionStatus(serverConfig.name, status, error);
+        if (status === "disconnected") {
+          this.handleBackendDisconnect(session, serverConfig.name);
+        }
+      },
+      onNotification: (notification): void => {
+        session.bufferManager.addNotification(notification);
+      },
+      onLog: (log): void => {
+        session.bufferManager.addLog(log);
+      },
+      onSamplingRequest: (request): void => {
+        // The client.ts creates requests with 'id', but our pending-requests
+        // uses 'requestId'. We add to our manager which creates its own ID.
+        session.pendingRequests.addSamplingRequest(
+          request.server,
+          request.params,
+          request.resolve,
+          request.reject
+        );
+      },
+      onElicitationRequest: (request): void => {
+        session.pendingRequests.addElicitationRequest(
+          request.server,
+          request.params,
+          request.resolve,
+          request.reject
+        );
+      },
+    });
+
+    // Add connection record before connecting
+    session.addConnection(serverConfig.name, client);
+
+    try {
+      await client.connect();
+
+      // Update connection status
+      session.setConnectionStatus(serverConfig.name, "connected");
+
+      // Emit server_connected event
+      session.eventSystem.addEvent("server_connected", serverConfig.name, {
+        name: serverConfig.name,
+        capabilities: client.getInfo().capabilities,
+      });
+
+      this.logger?.info("session_server_connected", {
+        sessionId: session.sessionId,
+        server: serverConfig.name,
+      });
+
+      const connection = session.getConnection(serverConfig.name);
+      if (!connection) {
+        throw new Error("Connection not found after connect");
+      }
+      return connection;
+    } catch (err) {
+      // Update connection with error
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      session.setConnectionStatus(serverConfig.name, "error", errorMessage);
+
+      this.logger?.warn("session_server_connect_failed", {
+        sessionId: session.sessionId,
+        server: serverConfig.name,
+        error: errorMessage,
+      });
+
+      throw err;
+    }
+  }
+
+  /**
+   * Disconnect a session from a server.
+   */
+  private async disconnectSessionFromServer(
+    session: SessionState,
+    serverName: string
+  ): Promise<void> {
+    const connection = session.getConnection(serverName);
+    if (!connection) return;
+
+    // Fail tasks for this server
+    const tasks = session.taskManager.getTasksForServer(serverName);
+    for (const task of tasks) {
+      if (task.status === "working") {
+        session.taskManager.failTask(task.taskId, "Server removed");
+      }
+    }
+
+    // Reject pending requests for this server
+    session.pendingRequests.rejectRequestsForServer(serverName, "Server removed");
+
+    // Disconnect client
+    try {
+      await connection.client.disconnect();
+    } catch {
+      // Ignore disconnect errors
+    }
+
+    session.removeConnection(serverName);
+  }
+
+  /**
+   * Handle backend server disconnect event.
+   */
+  private handleBackendDisconnect(session: SessionState, serverName: string): void {
+    // Fail working tasks
+    const tasks = session.taskManager.getTasksForServer(serverName);
+    for (const task of tasks) {
+      if (task.status === "working") {
+        session.taskManager.failTask(task.taskId, "Server disconnected");
+      }
+    }
+
+    // Reject pending requests
+    session.pendingRequests.rejectRequestsForServer(serverName, "Server disconnected");
+
+    // Emit event
+    session.eventSystem.addEvent("server_disconnected", serverName, {
+      name: serverName,
+    });
+
+    this.logger?.info("session_server_disconnected", {
+      sessionId: session.sessionId,
+      server: serverName,
+    });
+  }
+
+  // ==================== Cleanup ====================
+
+  /**
+   * Start the background cleanup interval for abandoned sessions.
+   */
+  private startCleanupInterval(): void {
+    this.cleanupIntervalHandle = setInterval(() => {
+      this.runSessionCleanup();
+    }, this.config.cleanupIntervalMs);
+  }
+
+  /**
+   * Check for and clean up abandoned sessions.
+   */
+  private runSessionCleanup(): void {
+    const now = Date.now();
+    const toCleanup: string[] = [];
+
+    for (const [sessionId, session] of this.sessions) {
+      const idle = now - session.lastActivityAt.getTime();
+      if (idle >= this.config.sessionTimeoutMs) {
+        toCleanup.push(sessionId);
+      }
+    }
+
+    for (const sessionId of toCleanup) {
+      this.logger?.info("session_timeout_cleanup", { sessionId });
+      void this.destroySession(sessionId);
+    }
+  }
+
+  /**
+   * Graceful shutdown - clean up all sessions and resources.
+   */
+  public async shutdown(): Promise<void> {
+    this.logger?.info("session_manager_shutdown_start", {
+      sessionCount: this.sessions.size,
+    });
+
+    // Stop cleanup interval
+    if (this.cleanupIntervalHandle) {
+      clearInterval(this.cleanupIntervalHandle);
+      this.cleanupIntervalHandle = null;
+    }
+
+    // Destroy all sessions
+    for (const sessionId of Array.from(this.sessions.keys())) {
+      await this.destroySession(sessionId);
+    }
+
+    this.logger?.info("session_manager_shutdown_complete", {});
+  }
+
+  // ==================== Accessors ====================
+
+  /**
+   * Get the server config registry.
+   */
+  public getServerConfigs(): ServerConfigRegistry {
+    return this.serverConfigs;
+  }
+
+  /**
+   * Get all active session IDs.
+   */
+  public listSessionIds(): string[] {
+    return Array.from(this.sessions.keys());
+  }
+
+  /**
+   * Get the number of active sessions.
+   */
+  public get sessionCount(): number {
+    return this.sessions.size;
+  }
+}

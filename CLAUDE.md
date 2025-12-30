@@ -1,3 +1,5 @@
+<!-- vibe-rules Integration -->
+
 # emceepee
 
 An MCP proxy server with static tools for managing dynamic backend MCP servers.
@@ -115,3 +117,5 @@ bun run dev -- --config ./servers.json
   ]
 }
 ```
+
+<!-- /vibe-rules Integration -->

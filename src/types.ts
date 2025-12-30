@@ -13,7 +13,66 @@ import type {
   CreateMessageResult,
   ElicitRequestParams,
   ElicitResult,
+  ServerCapabilities,
 } from "@modelcontextprotocol/sdk/types.js";
+
+// Re-export ServerCapabilities for convenience
+export type { ServerCapabilities };
+
+// =============================================================================
+// New State Module Types (canonical source for new code)
+// =============================================================================
+
+// Event system types
+export type {
+  ProxyEventType,
+  StoredEvent,
+  EventSystemConfig,
+} from "./state/event-system.js";
+
+// Task manager types
+export type {
+  ProxyTask,
+  ProxyTaskStatus,
+  TaskManagerConfig,
+} from "./state/task-manager.js";
+
+// =============================================================================
+// New Types for Refactored Architecture
+// =============================================================================
+
+/**
+ * Tool info from tools/list response (used by list_tools)
+ */
+export interface ToolInfo {
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+}
+
+/**
+ * Server info for list_servers tool (enhanced version of BackendServerInfo)
+ */
+export interface ServerInfo {
+  name: string;
+  url: string;
+  connected: boolean;
+  status: "connecting" | "connected" | "disconnected" | "error" | "not_connected";
+  connectedAt?: Date;
+  lastError?: string;
+}
+
+/**
+ * Result of server restart reconciliation
+ */
+export interface ReconciliationResult {
+  invalidatedElicitations: string[];
+  invalidatedSamplingRequests: string[];
+  invalidatedTasks: string[];
+  refreshedTools: boolean;
+  refreshedResources: boolean;
+  refreshedPrompts: boolean;
+}
 
 /**
  * Configuration for a backend MCP server
