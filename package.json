@@ -1,6 +1,6 @@
 {
   "name": "mcp-proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP proxy server with static tools for managing dynamic backend MCP servers",
   "type": "module",
   "bin": {
