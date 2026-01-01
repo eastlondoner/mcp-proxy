@@ -50,4 +50,4 @@ jobs:
         run: bun run build
 
       - name: Verify build output
-        run: test -f dist/mcp-proxy.js
+        run: test -f dist/emceepee.js && test -f dist/emceepee-http.js

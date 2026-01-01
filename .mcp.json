@@ -5,7 +5,7 @@
       "command": "bun",
       "args": [
         "run",
-        "dev:stdio"
+        "dev"
       ],
       "env": {}
     }

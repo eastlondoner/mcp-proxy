@@ -1,5 +1,8 @@
 # Improving Code Factoring Plan
 
+> **Status**: This refactoring plan has been implemented. The document is retained for historical reference.
+> The `registry.ts` file mentioned below has been replaced by the `session/` and `state/` modules.
+
 This document outlines a plan to refactor the mcp-proxy codebase to support the new task-based tool execution model described in `TASKS_AND_ELICITATIONS.md` while maintaining clean separation of concerns and avoiding race conditions.
 
 **Related Documents:**

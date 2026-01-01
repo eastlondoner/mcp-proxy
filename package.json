@@ -5,11 +5,11 @@
   "type": "module",
   "bin": {
     "emceepee": "dist/emceepee.js",
-    "emceepee-stdio": "dist/emceepee-stdio.js"
+    "emceepee-http": "dist/emceepee-http.js"
   },
   "files": [
     "dist/emceepee.js",
-    "dist/emceepee-stdio.js",
+    "dist/emceepee-http.js",
     "README.md",
     "LICENSE"
   ],
@@ -32,13 +32,13 @@
     "cli"
   ],
   "scripts": {
-    "build": "bun build src/server.ts --outfile=dist/emceepee.js --target=node --minify && bun build src/server-stdio.ts --outfile=dist/emceepee-stdio.js --target=node --minify",
-    "build:http": "bun build src/server.ts --outfile=dist/emceepee.js --target=node --minify",
-    "build:stdio": "bun build src/server-stdio.ts --outfile=dist/emceepee-stdio.js --target=node --minify",
+    "build": "bun build src/server-stdio.ts --outfile=dist/emceepee.js --target=node --minify && bun build src/server.ts --outfile=dist/emceepee-http.js --target=node --minify",
+    "build:stdio": "bun build src/server-stdio.ts --outfile=dist/emceepee.js --target=node --minify",
+    "build:http": "bun build src/server.ts --outfile=dist/emceepee-http.js --target=node --minify",
     "start": "node dist/emceepee.js",
-    "start:stdio": "node dist/emceepee-stdio.js",
-    "dev": "bun run src/server.ts",
-    "dev:stdio": "bun run src/server-stdio.ts",
+    "start:http": "node dist/emceepee-http.js",
+    "dev": "bun run src/server-stdio.ts",
+    "dev:http": "bun run src/server.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",
