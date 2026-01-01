@@ -14,6 +14,8 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readFileSync } from "fs";
 
@@ -21,6 +23,85 @@ import { SessionManager } from "./session/session-manager.js";
 import type { SessionState } from "./session/session-state.js";
 import type { ProxyConfig } from "./types.js";
 import { createFileLogger, createNullLogger, type StructuredLogger } from "./logging.js";
+
+// =============================================================================
+// Logging Transport Wrapper
+// =============================================================================
+
+/**
+ * Wraps a Transport to log all incoming and outgoing messages.
+ * Useful for debugging protocol issues.
+ */
+function createLoggingTransport(
+  inner: Transport,
+  logger: StructuredLogger
+): Transport {
+  const wrapped: Transport = {
+    start: async () => {
+      logger.debug("transport_start", {});
+      return inner.start();
+    },
+
+    send: async (message: JSONRPCMessage, options) => {
+      logger.debug("transport_send", {
+        message: JSON.stringify(message),
+        hasRelatedRequestId: options?.relatedRequestId !== undefined,
+      });
+      return inner.send(message, options);
+    },
+
+    close: async () => {
+      logger.debug("transport_close", {});
+      return inner.close();
+    },
+
+    get sessionId() {
+      return inner.sessionId;
+    },
+
+    set onclose(handler: (() => void) | undefined) {
+      inner.onclose = handler
+        ? (): void => {
+            logger.debug("transport_onclose", {});
+            handler();
+          }
+        : undefined;
+    },
+    get onclose() {
+      return inner.onclose;
+    },
+
+    set onerror(handler: ((error: Error) => void) | undefined) {
+      inner.onerror = handler
+        ? (error: Error): void => {
+            logger.debug("transport_onerror", { error: error.message });
+            handler(error);
+          }
+        : undefined;
+    },
+    get onerror() {
+      return inner.onerror;
+    },
+
+    set onmessage(handler: ((message: JSONRPCMessage) => void) | undefined) {
+      inner.onmessage = handler
+        ? (message: JSONRPCMessage): void => {
+            logger.debug("transport_onmessage", {
+              message: JSON.stringify(message),
+            });
+            handler(message);
+          }
+        : undefined;
+    },
+    get onmessage() {
+      return inner.onmessage;
+    },
+
+    setProtocolVersion: inner.setProtocolVersion?.bind(inner),
+  };
+
+  return wrapped;
+}
 
 // =============================================================================
 // Types
@@ -972,10 +1053,40 @@ async function main(): Promise<void> {
   const { configPath, logLevel, logFile } = parseArgs();
 
   // In stdio mode, we can't log to console (that would interfere with the protocol).
-  // Use file logging if specified, otherwise create a silent logger.
+  // Use file logging if specified via CLI arg or EMCEEPEE_LOG_DIR env var.
   let logger: StructuredLogger;
-  if (logFile) {
-    logger = createFileLogger(logLevel, logFile);
+
+  // Determine log file path: CLI arg takes precedence, then env var
+  let effectiveLogFile = logFile;
+  const logDir = process.env["EMCEEPEE_LOG_DIR"];
+  if (!effectiveLogFile && logDir) {
+    // Create timestamped log file in the specified directory
+    const fs = await import("fs");
+    const path = await import("path");
+
+    // Expand ~ to home directory
+    const expandedDir = logDir.startsWith("~")
+      ? path.join(process.env["HOME"] ?? "", logDir.slice(1))
+      : logDir;
+
+    // Ensure directory exists
+    try {
+      fs.mkdirSync(expandedDir, { recursive: true });
+    } catch {
+      // Directory may already exist, ignore
+    }
+
+    // Create log file with timestamp and PID for uniqueness
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    effectiveLogFile = path.join(expandedDir, `emceepee-${timestamp}-${String(process.pid)}.log`);
+  }
+
+  if (effectiveLogFile) {
+    // Default to debug level when logging to file via env var
+    const effectiveLogLevel = logFile ? logLevel : (logDir ? "debug" : logLevel);
+    logger = createFileLogger(effectiveLogLevel, effectiveLogFile);
+    // Log startup info including the log file location
+    logger.info("Logging initialized", { logFile: effectiveLogFile, logLevel: effectiveLogLevel });
   } else {
     logger = createNullLogger();
   }
@@ -1023,15 +1134,18 @@ async function main(): Promise<void> {
   // Register all tools with a getter for the active session
   registerTools(mcpServer, sessionManager, () => activeSession);
 
-  // Create stdio transport
-  const transport = new StdioServerTransport();
+  // Create stdio transport (with optional logging wrapper for debugging)
+  const rawTransport = new StdioServerTransport();
+  const transport = effectiveLogFile
+    ? createLoggingTransport(rawTransport, logger)
+    : rawTransport;
 
   // Handle shutdown
   const shutdown = async (): Promise<void> => {
     logger.info("Shutting down...", {});
 
     // Close transport
-    await transport.close();
+    await rawTransport.close();
 
     // Shutdown session manager (cleans up all sessions)
     await sessionManager.shutdown();
