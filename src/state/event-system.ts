@@ -30,9 +30,13 @@ export type ProxyEventType =
   // Server lifecycle
   | "server_connected"
   | "server_disconnected"
+  | "server_reconnecting"
   | "server_reconnected"
   | "server_added"
-  | "server_removed";
+  | "server_removed"
+  // Health check events
+  | "server_health_degraded"
+  | "server_health_restored";
 
 /**
  * A stored event with metadata

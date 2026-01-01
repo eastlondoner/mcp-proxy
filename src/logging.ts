@@ -95,3 +95,52 @@ export function createNullLogger(): StructuredLogger {
     error: noop,
   };
 }
+
+/**
+ * Create a file logger that appends log messages to a file.
+ * Writes to stderr when file operations fail.
+ *
+ * @param minLevel - Minimum log level to output (default: "info")
+ * @param filePath - Path to the log file
+ */
+export function createFileLogger(minLevel: LogLevel = "info", filePath: string): StructuredLogger {
+  const minValue = LOG_LEVEL_VALUES[minLevel];
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- fs is Node.js built-in, safe to require
+  const fs = require("fs") as { appendFileSync: (path: string, data: string) => void };
+
+  const log = (level: LogLevel, message: string, context?: LogContext): void => {
+    if (LOG_LEVEL_VALUES[level] < minValue) {
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    const contextStr = context ? ` ${JSON.stringify(context)}` : "";
+    const line = `[${timestamp}] ${level.toUpperCase()} ${message}${contextStr}\n`;
+
+    try {
+      fs.appendFileSync(filePath, line);
+    } catch (err) {
+      // Fall back to stderr if file write fails
+      process.stderr.write(`Failed to write to log file: ${String(err)}\n`);
+      process.stderr.write(line);
+    }
+  };
+
+  return {
+    debug: (message, context): void => {
+      log("debug", message, context);
+    },
+    info: (message, context): void => {
+      log("info", message, context);
+    },
+    warn: (message, context): void => {
+      log("warn", message, context);
+    },
+    error: (message, context): void => {
+      log("error", message, context);
+    },
+  };
+}
+
+/** Logger type alias for convenience */
+export type Logger = StructuredLogger;

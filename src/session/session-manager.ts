@@ -183,14 +183,23 @@ export class SessionManager {
    * Disconnects all sessions from this server.
    */
   public async removeServer(sessionId: string, name: string): Promise<void> {
+    this.logger?.debug("removeServer_start", { sessionId, serverName: name });
+
     // 1. Remove from global config registry
     const existed = this.serverConfigs.removeConfig(name);
     if (!existed) {
+      this.logger?.debug("removeServer_not_found", { sessionId, serverName: name });
       throw new Error(`Server '${name}' not found`);
     }
 
     // 2. Disconnect ALL sessions from this server
-    for (const [, session] of this.sessions) {
+    for (const [sid, session] of this.sessions) {
+      this.logger?.debug("removeServer_disconnecting_session", {
+        sessionId: sid,
+        serverName: name,
+        hasConnection: session.getConnection(name) !== undefined,
+      });
+
       await this.disconnectSessionFromServer(session, name);
 
       // Emit server_removed event to this session's EventSystem
@@ -199,6 +208,8 @@ export class SessionManager {
         removedBy: sessionId,
       });
     }
+
+    this.logger?.debug("removeServer_complete", { sessionId, serverName: name });
   }
 
   /**
@@ -210,7 +221,7 @@ export class SessionManager {
 
     return configs.map((serverConfig) => {
       const connection = session?.getConnection(serverConfig.name);
-      return {
+      const info: ServerInfo = {
         name: serverConfig.name,
         url: serverConfig.url,
         connected: connection?.status === "connected",
@@ -218,10 +229,75 @@ export class SessionManager {
         connectedAt: connection?.connectedAt,
         lastError: connection?.lastError,
       };
+
+      // Add reconnection state if reconnecting
+      if (connection?.status === "reconnecting") {
+        const reconnState = connection.client.getReconnectionState();
+        if (reconnState) {
+          info.reconnectAttempt = reconnState.attempt;
+          info.nextRetryMs = reconnState.nextRetryMs;
+        }
+      }
+
+      // Add health status if connected
+      if (connection?.status === "connected") {
+        info.healthStatus = connection.client.getHealthStatus();
+        const healthFailures = connection.client.getConsecutiveHealthFailures();
+        if (healthFailures > 0) {
+          info.consecutiveHealthFailures = healthFailures;
+        }
+      }
+
+      return info;
     });
   }
 
   // ==================== Backend Connection Management ====================
+
+  /**
+   * Force reconnect a server for a session.
+   * Works on connected, disconnected, or reconnecting servers.
+   * Cancels any pending reconnection and immediately attempts a fresh connection.
+   */
+  public async reconnectServer(sessionId: string, serverName: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session '${sessionId}' not found`);
+    }
+
+    const serverConfig = this.serverConfigs.getConfig(serverName);
+    if (!serverConfig) {
+      throw new Error(`Server '${serverName}' not found`);
+    }
+
+    const connection = session.getConnection(serverName);
+    if (!connection) {
+      // Server config exists but no connection for this session - create one
+      await this.connectSessionToServer(session, serverConfig);
+      return;
+    }
+
+    // Fail pending work before reconnecting (backend state will be lost)
+    this.handleBackendDisconnect(session, serverName);
+
+    // Force reconnect the existing client
+    await connection.client.forceReconnect();
+
+    // Update connection status
+    session.setConnectionStatus(serverName, "connected");
+
+    // Emit reconnected event (with 0 attempts since it was forced)
+    session.eventSystem.addEvent("server_reconnected", serverName, {
+      name: serverName,
+      attemptsTaken: 0,
+      forced: true,
+    });
+
+    this.logger?.info("session_server_force_reconnected", {
+      sessionId: session.sessionId,
+      server: serverName,
+    });
+  }
 
   /**
    * Get or create a backend connection for a session.
@@ -293,9 +369,8 @@ export class SessionManager {
       url: serverConfig.url,
       onStatusChange: (status, error): void => {
         session.setConnectionStatus(serverConfig.name, status, error);
-        if (status === "disconnected") {
-          this.handleBackendDisconnect(session, serverConfig.name);
-        }
+        // Note: "disconnected" is only for intentional disconnect (remove_server)
+        // Unexpected disconnects go through "reconnecting" state via onReconnecting callback
       },
       onNotification: (notification): void => {
         session.bufferManager.addNotification(notification);
@@ -320,6 +395,68 @@ export class SessionManager {
           request.resolve,
           request.reject
         );
+      },
+      // Reconnection callbacks
+      onReconnecting: (attempt, nextRetryMs): void => {
+        // On first reconnect attempt, fail pending work since backend state is lost
+        if (attempt === 1) {
+          this.handleBackendDisconnect(session, serverConfig.name);
+        }
+
+        // Emit reconnecting event
+        session.eventSystem.addEvent("server_reconnecting", serverConfig.name, {
+          name: serverConfig.name,
+          attempt,
+          nextRetryMs,
+        });
+
+        this.logger?.debug("session_server_reconnecting", {
+          sessionId: session.sessionId,
+          server: serverConfig.name,
+          attempt,
+          nextRetryMs,
+        });
+      },
+      onReconnected: (attemptsTaken): void => {
+        // Update connection status
+        session.setConnectionStatus(serverConfig.name, "connected");
+
+        // Emit reconnected event
+        session.eventSystem.addEvent("server_reconnected", serverConfig.name, {
+          name: serverConfig.name,
+          attemptsTaken,
+        });
+
+        this.logger?.info("session_server_reconnected", {
+          sessionId: session.sessionId,
+          server: serverConfig.name,
+          attemptsTaken,
+        });
+      },
+      // Health check callbacks
+      onHealthDegraded: (failures, lastError): void => {
+        session.eventSystem.addEvent("server_health_degraded", serverConfig.name, {
+          name: serverConfig.name,
+          consecutiveFailures: failures,
+          lastError,
+        });
+
+        this.logger?.warn("session_server_health_degraded", {
+          sessionId: session.sessionId,
+          server: serverConfig.name,
+          consecutiveFailures: failures,
+          lastError,
+        });
+      },
+      onHealthRestored: (): void => {
+        session.eventSystem.addEvent("server_health_restored", serverConfig.name, {
+          name: serverConfig.name,
+        });
+
+        this.logger?.info("session_server_health_restored", {
+          sessionId: session.sessionId,
+          server: serverConfig.name,
+        });
       },
     });
 
@@ -371,7 +508,19 @@ export class SessionManager {
     serverName: string
   ): Promise<void> {
     const connection = session.getConnection(serverName);
-    if (!connection) return;
+    if (!connection) {
+      this.logger?.debug("disconnectSessionFromServer_no_connection", {
+        sessionId: session.sessionId,
+        serverName,
+      });
+      return;
+    }
+
+    this.logger?.debug("disconnectSessionFromServer_start", {
+      sessionId: session.sessionId,
+      serverName,
+      connectionStatus: connection.status,
+    });
 
     // Fail tasks for this server
     const tasks = session.taskManager.getTasksForServer(serverName);
@@ -386,12 +535,29 @@ export class SessionManager {
 
     // Disconnect client
     try {
+      this.logger?.debug("disconnectSessionFromServer_calling_disconnect", {
+        sessionId: session.sessionId,
+        serverName,
+      });
       await connection.client.disconnect();
-    } catch {
-      // Ignore disconnect errors
+      this.logger?.debug("disconnectSessionFromServer_disconnect_complete", {
+        sessionId: session.sessionId,
+        serverName,
+      });
+    } catch (err) {
+      // Log but ignore disconnect errors
+      this.logger?.debug("disconnectSessionFromServer_disconnect_error", {
+        sessionId: session.sessionId,
+        serverName,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
 
     session.removeConnection(serverName);
+    this.logger?.debug("disconnectSessionFromServer_complete", {
+      sessionId: session.sessionId,
+      serverName,
+    });
   }
 
   /**

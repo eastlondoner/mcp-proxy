@@ -38,6 +38,11 @@ import type {
 } from "./types.js";
 
 /**
+ * Health status of the connection
+ */
+export type HealthStatus = "healthy" | "degraded";
+
+/**
  * Options for creating an MCPHttpClient
  */
 export interface MCPHttpClientOptions {
@@ -55,6 +60,14 @@ export interface MCPHttpClientOptions {
   onSamplingRequest?: (request: PendingSamplingRequest) => void;
   /** Callback when an elicitation request is received from the server */
   onElicitationRequest?: (request: PendingElicitationRequest) => void;
+  /** Callback when a reconnection attempt starts */
+  onReconnecting?: (attempt: number, nextRetryMs: number) => void;
+  /** Callback when successfully reconnected */
+  onReconnected?: (attemptsTaken: number) => void;
+  /** Callback when health degrades (3+ consecutive failures) */
+  onHealthDegraded?: (failures: number, lastError: string) => void;
+  /** Callback when health is restored after being degraded */
+  onHealthRestored?: () => void;
 }
 
 /**
@@ -68,6 +81,18 @@ export interface MCPHttpClientOptions {
  * - Listing and getting prompts
  * - Handling notifications
  */
+// Reconnection constants
+const RECONNECT_BASE_DELAY_MS = 1000;      // 1 second
+const RECONNECT_MAX_DELAY_MS = 180000;     // 180 seconds (3 minutes)
+const RECONNECT_BACKOFF_MULTIPLIER = 2;
+const RECONNECT_JITTER_FACTOR = 0.1;       // 10% jitter
+
+// Health check constants
+const HEALTH_CHECK_INTERVAL_MS = 120000;   // 120 seconds
+const HEALTH_CHECK_JITTER_FACTOR = 0.1;    // 10% jitter
+const HEALTH_CHECK_TIMEOUT_MS = 60000;     // 60 seconds
+const HEALTH_CHECK_DEGRADED_THRESHOLD = 3; // 3 consecutive failures
+
 export class MCPHttpClient {
   private readonly name: string;
   private readonly url: string;
@@ -84,6 +109,14 @@ export class MCPHttpClient {
   private readonly onElicitationRequest:
     | ((request: PendingElicitationRequest) => void)
     | undefined;
+  private readonly onReconnecting:
+    | ((attempt: number, nextRetryMs: number) => void)
+    | undefined;
+  private readonly onReconnected: ((attemptsTaken: number) => void) | undefined;
+  private readonly onHealthDegraded:
+    | ((failures: number, lastError: string) => void)
+    | undefined;
+  private readonly onHealthRestored: (() => void) | undefined;
 
   private client: Client | null = null;
   private transport: StreamableHTTPClientTransport | null = null;
@@ -91,6 +124,17 @@ export class MCPHttpClient {
   private errorMessage: string | undefined;
   private capabilities: BackendServerInfo["capabilities"] | undefined;
   private isClosing = false;
+
+  // Reconnection state
+  private reconnectAttempt = 0;
+  private reconnectTimeoutHandle: NodeJS.Timeout | null = null;
+  private nextRetryMs = 0;
+  private isReconnecting = false;
+
+  // Health check state
+  private healthCheckIntervalHandle: NodeJS.Timeout | null = null;
+  private consecutiveHealthFailures = 0;
+  private healthStatus: HealthStatus = "healthy";
 
   constructor(options: MCPHttpClientOptions) {
     this.name = options.name;
@@ -100,6 +144,10 @@ export class MCPHttpClient {
     this.onLog = options.onLog;
     this.onSamplingRequest = options.onSamplingRequest;
     this.onElicitationRequest = options.onElicitationRequest;
+    this.onReconnecting = options.onReconnecting;
+    this.onReconnected = options.onReconnected;
+    this.onHealthDegraded = options.onHealthDegraded;
+    this.onHealthRestored = options.onHealthRestored;
   }
 
   /**
@@ -145,6 +193,33 @@ export class MCPHttpClient {
   }
 
   /**
+   * Get reconnection state if currently reconnecting
+   */
+  public getReconnectionState(): { attempt: number; nextRetryMs: number } | null {
+    if (this.status !== "reconnecting") {
+      return null;
+    }
+    return {
+      attempt: this.reconnectAttempt,
+      nextRetryMs: this.nextRetryMs,
+    };
+  }
+
+  /**
+   * Get health status
+   */
+  public getHealthStatus(): HealthStatus {
+    return this.healthStatus;
+  }
+
+  /**
+   * Get consecutive health check failures count
+   */
+  public getConsecutiveHealthFailures(): number {
+    return this.consecutiveHealthFailures;
+  }
+
+  /**
    * Connect to the backend MCP server
    */
   public async connect(): Promise<void> {
@@ -181,9 +256,9 @@ export class MCPHttpClient {
 
       // Set up transport event handlers
       this.transport.onclose = (): void => {
-        // Only set disconnected if not already closing (avoid duplicate status)
+        // Only handle if not already closing (avoid duplicate handling)
         if (!this.isClosing) {
-          this.setStatus("disconnected");
+          this.handleUnexpectedDisconnect();
         }
       };
 
@@ -193,7 +268,8 @@ export class MCPHttpClient {
         if (isAbortError && (this.isClosing || this.status === "disconnected")) {
           return;
         }
-        this.setStatus("error", error.message);
+        this.errorMessage = error.message;
+        this.handleUnexpectedDisconnect();
       };
 
       // Connect and initialize
@@ -209,6 +285,9 @@ export class MCPHttpClient {
       };
 
       this.setStatus("connected");
+
+      // Start health checks
+      this.startHealthChecks();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.setStatus("error", message);
@@ -217,10 +296,16 @@ export class MCPHttpClient {
   }
 
   /**
-   * Disconnect from the backend MCP server
+   * Disconnect from the backend MCP server (intentional disconnect)
    */
   public async disconnect(): Promise<void> {
     this.isClosing = true;
+
+    // Stop health checks
+    this.stopHealthChecks();
+
+    // Cancel any pending reconnection
+    this.cancelReconnection();
 
     if (this.transport) {
       try {
@@ -234,6 +319,54 @@ export class MCPHttpClient {
     this.transport = null;
     this.isClosing = false;
     this.setStatus("disconnected");
+  }
+
+  /**
+   * Force reconnection to the backend server.
+   * Works on connected, disconnected, or reconnecting servers.
+   */
+  public async forceReconnect(): Promise<void> {
+    // Stop health checks
+    this.stopHealthChecks();
+
+    // Cancel any pending reconnection
+    this.cancelReconnection();
+
+    // Close existing connection if any
+    if (this.transport) {
+      this.isClosing = true;
+      try {
+        await this.transport.close();
+      } catch {
+        // Ignore close errors
+      }
+      this.isClosing = false;
+    }
+
+    this.client = null;
+    this.transport = null;
+
+    // Reset reconnection state
+    this.reconnectAttempt = 0;
+    this.nextRetryMs = 0;
+
+    // Reset health state
+    this.consecutiveHealthFailures = 0;
+    this.healthStatus = "healthy";
+
+    // Connect (this will throw if it fails)
+    await this.connect();
+  }
+
+  /**
+   * Cancel any scheduled reconnection attempt
+   */
+  public cancelReconnection(): void {
+    if (this.reconnectTimeoutHandle) {
+      clearTimeout(this.reconnectTimeoutHandle);
+      this.reconnectTimeoutHandle = null;
+    }
+    this.isReconnecting = false;
   }
 
   /**
@@ -445,6 +578,245 @@ export class MCPHttpClient {
         method,
         params,
       });
+    }
+  }
+
+  /**
+   * Handle unexpected disconnection from the backend server.
+   * Starts the reconnection process.
+   */
+  private handleUnexpectedDisconnect(): void {
+    // Prevent multiple reconnection attempts
+    if (this.isReconnecting || this.isClosing) {
+      return;
+    }
+
+    // Stop health checks while disconnected
+    this.stopHealthChecks();
+
+    // Clean up current connection
+    this.client = null;
+    this.transport = null;
+
+    // Start reconnection process
+    this.isReconnecting = true;
+    this.reconnectAttempt = 0;
+    this.setStatus("reconnecting", this.errorMessage);
+
+    // Schedule first reconnection attempt
+    this.scheduleReconnection();
+  }
+
+  /**
+   * Schedule the next reconnection attempt with exponential backoff.
+   */
+  private scheduleReconnection(): void {
+    if (this.isClosing) {
+      return;
+    }
+
+    this.reconnectAttempt++;
+    const delay = this.calculateBackoff(this.reconnectAttempt);
+    this.nextRetryMs = delay;
+
+    // Notify callback
+    if (this.onReconnecting) {
+      this.onReconnecting(this.reconnectAttempt, delay);
+    }
+
+    this.reconnectTimeoutHandle = setTimeout(() => {
+      void this.attemptReconnection();
+    }, delay);
+  }
+
+  /**
+   * Attempt to reconnect to the backend server.
+   */
+  private async attemptReconnection(): Promise<void> {
+    if (this.isClosing) {
+      return;
+    }
+
+    try {
+      // Create new transport
+      this.transport = new StreamableHTTPClientTransport(new URL(this.url));
+
+      // Create new client
+      this.client = new Client(
+        {
+          name: "emceepee",
+          version: "0.1.0",
+        },
+        {
+          capabilities: {
+            sampling: {},
+            elicitation: {
+              form: {},
+            },
+          },
+        }
+      );
+
+      // Set up notification handler before connecting
+      this.setupNotificationHandler();
+
+      // Set up transport event handlers for future disconnects
+      this.transport.onclose = (): void => {
+        if (!this.isClosing) {
+          this.handleUnexpectedDisconnect();
+        }
+      };
+
+      this.transport.onerror = (error): void => {
+        const isAbortError = error.name === "AbortError" || error.message.includes("AbortError");
+        if (isAbortError && (this.isClosing || this.status === "disconnected")) {
+          return;
+        }
+        this.errorMessage = error.message;
+        this.handleUnexpectedDisconnect();
+      };
+
+      // Connect and initialize
+      await this.client.connect(this.transport);
+
+      // Get server capabilities
+      const serverCapabilities = this.client.getServerCapabilities();
+      this.capabilities = {
+        tools: serverCapabilities?.tools !== undefined,
+        resources: serverCapabilities?.resources !== undefined,
+        prompts: serverCapabilities?.prompts !== undefined,
+        resourceTemplates: serverCapabilities?.resources !== undefined,
+      };
+
+      // Success! Reset reconnection state
+      const attemptsTaken = this.reconnectAttempt;
+      this.reconnectAttempt = 0;
+      this.nextRetryMs = 0;
+      this.isReconnecting = false;
+
+      // Reset health state
+      this.consecutiveHealthFailures = 0;
+      this.healthStatus = "healthy";
+
+      this.setStatus("connected");
+
+      // Notify callback
+      if (this.onReconnected) {
+        this.onReconnected(attemptsTaken);
+      }
+
+      // Start health checks
+      this.startHealthChecks();
+    } catch (err) {
+      // Clean up failed attempt
+      this.client = null;
+      this.transport = null;
+      this.errorMessage = err instanceof Error ? err.message : String(err);
+
+      // Schedule next attempt
+      this.scheduleReconnection();
+    }
+  }
+
+  /**
+   * Calculate reconnection delay with exponential backoff and jitter.
+   */
+  private calculateBackoff(attempt: number): number {
+    // Calculate base delay with exponential backoff
+    const exponentialDelay =
+      RECONNECT_BASE_DELAY_MS * Math.pow(RECONNECT_BACKOFF_MULTIPLIER, attempt - 1);
+
+    // Cap at max delay
+    const cappedDelay = Math.min(exponentialDelay, RECONNECT_MAX_DELAY_MS);
+
+    // Add jitter (±10%)
+    const jitter = cappedDelay * RECONNECT_JITTER_FACTOR * (Math.random() * 2 - 1);
+
+    return Math.round(cappedDelay + jitter);
+  }
+
+  /**
+   * Start periodic health checks.
+   */
+  private startHealthChecks(): void {
+    // Clear any existing interval
+    this.stopHealthChecks();
+
+    // Schedule first health check with jitter
+    const scheduleNextCheck = (): void => {
+      const jitter = HEALTH_CHECK_INTERVAL_MS * HEALTH_CHECK_JITTER_FACTOR * (Math.random() * 2 - 1);
+      const interval = Math.round(HEALTH_CHECK_INTERVAL_MS + jitter);
+
+      this.healthCheckIntervalHandle = setTimeout(() => {
+        void this.performHealthCheck();
+        scheduleNextCheck();
+      }, interval);
+    };
+
+    scheduleNextCheck();
+  }
+
+  /**
+   * Stop periodic health checks.
+   */
+  private stopHealthChecks(): void {
+    if (this.healthCheckIntervalHandle) {
+      clearTimeout(this.healthCheckIntervalHandle);
+      this.healthCheckIntervalHandle = null;
+    }
+  }
+
+  /**
+   * Perform a single health check using tools/list.
+   * Health check failures increment a counter and emit events when degraded,
+   * but do NOT trigger reconnection (to preserve SSE session for network recovery).
+   */
+  private async performHealthCheck(): Promise<void> {
+    if (!this.client || !this.isConnected()) {
+      return;
+    }
+
+    try {
+      // Use AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+      }, HEALTH_CHECK_TIMEOUT_MS);
+
+      try {
+        // Try to list tools as health check
+        await this.client.listTools();
+
+        // Success - reset failure counter
+        clearTimeout(timeoutId);
+
+        if (this.consecutiveHealthFailures > 0) {
+          const wasDegraaded = this.healthStatus === "degraded";
+          this.consecutiveHealthFailures = 0;
+          this.healthStatus = "healthy";
+
+          if (wasDegraaded && this.onHealthRestored) {
+            this.onHealthRestored();
+          }
+        }
+      } catch (err) {
+        clearTimeout(timeoutId);
+        throw err;
+      }
+    } catch (err) {
+      this.consecutiveHealthFailures++;
+      const errorMessage = err instanceof Error ? err.message : String(err);
+
+      // Check if we've crossed the degraded threshold
+      if (
+        this.consecutiveHealthFailures >= HEALTH_CHECK_DEGRADED_THRESHOLD &&
+        this.healthStatus !== "degraded"
+      ) {
+        this.healthStatus = "degraded";
+        if (this.onHealthDegraded) {
+          this.onHealthDegraded(this.consecutiveHealthFailures, errorMessage);
+        }
+      }
     }
   }
 

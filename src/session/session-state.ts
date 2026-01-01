@@ -46,7 +46,7 @@ export interface SessionStateConfig {
 /**
  * Status of a backend server connection within this session
  */
-export type BackendConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
+export type BackendConnectionStatus = "connecting" | "connected" | "disconnected" | "reconnecting" | "error";
 
 /**
  * A backend MCP server connection owned by this session

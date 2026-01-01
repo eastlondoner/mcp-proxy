@@ -51,15 +51,26 @@ export interface ToolInfo {
 }
 
 /**
+ * Health status of a backend server
+ */
+export type HealthStatus = "healthy" | "degraded";
+
+/**
  * Server info for list_servers tool (enhanced version of BackendServerInfo)
  */
 export interface ServerInfo {
   name: string;
   url: string;
   connected: boolean;
-  status: "connecting" | "connected" | "disconnected" | "error" | "not_connected";
+  status: BackendServerStatus | "not_connected";
   connectedAt?: Date;
   lastError?: string;
+  // Reconnection status (only present when status is "reconnecting")
+  reconnectAttempt?: number;
+  nextRetryMs?: number;
+  // Health status (only present when status is "connected")
+  healthStatus?: HealthStatus;
+  consecutiveHealthFailures?: number;
 }
 
 /**
@@ -94,7 +105,12 @@ export interface ProxyConfig {
 /**
  * Status of a backend server connection
  */
-export type BackendServerStatus = "connecting" | "connected" | "disconnected" | "error";
+export type BackendServerStatus =
+  | "connecting"     // Initial connection in progress
+  | "connected"      // Successfully connected
+  | "disconnected"   // Cleanly disconnected (intentional, e.g., remove_server)
+  | "reconnecting"   // Lost connection, attempting to reconnect
+  | "error";         // Connection error (with message)
 
 /**
  * Information about a connected backend server

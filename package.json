@@ -4,10 +4,12 @@
   "description": "MCP proxy server with static tools for managing dynamic backend MCP servers",
   "type": "module",
   "bin": {
-    "emceepee": "dist/emceepee.js"
+    "emceepee": "dist/emceepee.js",
+    "emceepee-stdio": "dist/emceepee-stdio.js"
   },
   "files": [
     "dist/emceepee.js",
+    "dist/emceepee-stdio.js",
     "README.md",
     "LICENSE"
   ],
@@ -30,9 +32,13 @@
     "cli"
   ],
   "scripts": {
-    "build": "bun build src/server.ts --outfile=dist/emceepee.js --target=node --minify",
+    "build": "bun build src/server.ts --outfile=dist/emceepee.js --target=node --minify && bun build src/server-stdio.ts --outfile=dist/emceepee-stdio.js --target=node --minify",
+    "build:http": "bun build src/server.ts --outfile=dist/emceepee.js --target=node --minify",
+    "build:stdio": "bun build src/server-stdio.ts --outfile=dist/emceepee-stdio.js --target=node --minify",
     "start": "node dist/emceepee.js",
+    "start:stdio": "node dist/emceepee-stdio.js",
     "dev": "bun run src/server.ts",
+    "dev:stdio": "bun run src/server-stdio.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",

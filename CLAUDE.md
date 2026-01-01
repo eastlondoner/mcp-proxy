@@ -118,4 +118,11 @@ bun run dev -- --config ./servers.json
 }
 ```
 
+## Testing Guide
+
+See [MCP_TESTING_GUIDE.md](./MCP_TESTING_GUIDE.md) for detailed instructions on:
+- Testing MCP servers through emceepee
+- Handling server restarts and reconnections
+- Daisy-chaining emceepee instances to test changes to emceepee itself
+
 <!-- /vibe-rules Integration -->
