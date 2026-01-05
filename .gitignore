@@ -3,3 +3,5 @@ dist/
 *.log
 .DS_Store
 ad-hoc-tests/
+# SpecStory explanation file
+.specstory/.what-is-this.md
