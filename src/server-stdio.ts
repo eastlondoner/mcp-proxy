@@ -852,8 +852,8 @@ function registerTools(
     {
       description: "Wait for activity (events, pending requests) or timeout. Use this to poll for changes efficiently instead of repeatedly calling get_* tools.",
       inputSchema: {
-        timeout_ms: z.number().min(100).max(60000).default(30000)
-          .describe("Maximum time to wait in milliseconds (100-60000, default: 30000)"),
+        timeout_ms: z.number().min(100).max(900000).default(30000)
+          .describe("Maximum time to wait in milliseconds (100-900000, default: 30000)"),
         last_event_id: z.string().optional()
           .describe("Only return events after this ID (for pagination/continuation)"),
       },

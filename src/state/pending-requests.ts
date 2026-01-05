@@ -227,7 +227,7 @@ export class PendingRequestsManager {
    * Cancel a pending sampling request.
    * Rejects the underlying promise with a specific error message.
    */
-  public cancelSampling(requestId: string, reason: string = "User cancelled"): void {
+  public cancelSampling(requestId: string, reason = "User cancelled"): void {
     const pending = this.samplingRequests.get(requestId);
     if (!pending) {
       throw new Error(`Sampling request '${requestId}' not found or already completed`);
@@ -264,7 +264,7 @@ export class PendingRequestsManager {
   /**
    * Cancel a pending elicitation request.
    */
-  public cancelElicitation(requestId: string, reason: string = "User cancelled"): void {
+  public cancelElicitation(requestId: string, reason = "User cancelled"): void {
     const pending = this.elicitationRequests.get(requestId);
     if (!pending) {
       throw new Error(`Elicitation request '${requestId}' not found or already completed`);
