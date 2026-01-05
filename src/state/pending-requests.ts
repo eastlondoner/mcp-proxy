@@ -224,6 +224,27 @@ export class PendingRequestsManager {
   }
 
   /**
+   * Cancel a pending sampling request.
+   * Rejects the underlying promise with a specific error message.
+   */
+  public cancelSampling(requestId: string, reason: string = "User cancelled"): void {
+    const pending = this.samplingRequests.get(requestId);
+    if (!pending) {
+      throw new Error(`Sampling request '${requestId}' not found or already completed`);
+    }
+
+    clearTimeout(pending.timeoutHandle);
+    this.samplingRequests.delete(requestId);
+    
+    this.eventSystem.addEvent("sampling_expired", pending.server, {
+      requestId,
+      reason,
+    });
+
+    pending.reject(new Error(reason));
+  }
+
+  /**
    * Respond to a pending elicitation request.
    * CRITICAL: Clears timeout handle to prevent memory leak.
    */
@@ -238,6 +259,26 @@ export class PendingRequestsManager {
 
     this.elicitationRequests.delete(requestId);
     pending.resolve(result);
+  }
+
+  /**
+   * Cancel a pending elicitation request.
+   */
+  public cancelElicitation(requestId: string, reason: string = "User cancelled"): void {
+    const pending = this.elicitationRequests.get(requestId);
+    if (!pending) {
+      throw new Error(`Elicitation request '${requestId}' not found or already completed`);
+    }
+
+    clearTimeout(pending.timeoutHandle);
+    this.elicitationRequests.delete(requestId);
+
+    this.eventSystem.addEvent("elicitation_expired", pending.server, {
+      requestId,
+      reason,
+    });
+
+    pending.reject(new Error(reason));
   }
 
   /**

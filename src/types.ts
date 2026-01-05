@@ -130,6 +130,8 @@ export interface BackendServerInfo {
     resources?: boolean;
     prompts?: boolean;
     resourceTemplates?: boolean;
+    /** Whether the server supports resource subscriptions */
+    resourceSubscriptions?: boolean;
   };
 }
 

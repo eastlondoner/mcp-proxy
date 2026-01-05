@@ -282,6 +282,7 @@ export class MCPHttpClient {
         resources: serverCapabilities?.resources !== undefined,
         prompts: serverCapabilities?.prompts !== undefined,
         resourceTemplates: serverCapabilities?.resources !== undefined,
+        resourceSubscriptions: serverCapabilities?.resources?.subscribe === true,
       };
 
       this.setStatus("connected");
@@ -433,6 +434,46 @@ export class MCPHttpClient {
 
     const result = await client.readResource({ uri });
     return result;
+  }
+
+  /**
+   * Subscribe to updates for a specific resource.
+   * The server will send notifications/resources/updated when the resource changes.
+   * @throws Error if the server doesn't support resource subscriptions
+   */
+  public async subscribeResource(uri: string): Promise<void> {
+    const client = this.getConnectedClient();
+
+    if (!this.capabilities?.resourceSubscriptions) {
+      throw new Error(
+        `Server '${this.name}' does not support resource subscriptions`
+      );
+    }
+
+    await client.subscribeResource({ uri });
+  }
+
+  /**
+   * Unsubscribe from updates for a specific resource.
+   * @throws Error if the server doesn't support resource subscriptions
+   */
+  public async unsubscribeResource(uri: string): Promise<void> {
+    const client = this.getConnectedClient();
+
+    if (!this.capabilities?.resourceSubscriptions) {
+      throw new Error(
+        `Server '${this.name}' does not support resource subscriptions`
+      );
+    }
+
+    await client.unsubscribeResource({ uri });
+  }
+
+  /**
+   * Check if the server supports resource subscriptions
+   */
+  public supportsResourceSubscriptions(): boolean {
+    return this.capabilities?.resourceSubscriptions === true;
   }
 
   /**
@@ -686,6 +727,7 @@ export class MCPHttpClient {
         resources: serverCapabilities?.resources !== undefined,
         prompts: serverCapabilities?.prompts !== undefined,
         resourceTemplates: serverCapabilities?.resources !== undefined,
+        resourceSubscriptions: serverCapabilities?.resources?.subscribe === true,
       };
 
       // Success! Reset reconnection state

@@ -565,6 +565,70 @@ function registerTools(
     }
   );
 
+  server.registerTool(
+    "subscribe_resource",
+    {
+      description: "Subscribe to updates for a specific resource. The server will send notifications when the resource changes. Use get_notifications or await_activity to receive updates.",
+      inputSchema: {
+        server: z.string().describe("Name of the backend server"),
+        uri: z.string().describe("URI of the resource to subscribe to"),
+      },
+    },
+    async ({ server: serverName, uri }, extra): Promise<ToolResponse> => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      try {
+        const client = await sessionManager.getOrCreateConnection(session.sessionId, serverName);
+
+        // Check if server supports subscriptions
+        if (!client.supportsResourceSubscriptions()) {
+          return toolError(`Server '${serverName}' does not support resource subscriptions`);
+        }
+
+        await client.subscribeResource(uri);
+        return toolSuccess(`Subscribed to resource '${uri}' on server '${serverName}'`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return toolError(`Failed to subscribe to resource: ${message}`);
+      }
+    }
+  );
+
+  server.registerTool(
+    "unsubscribe_resource",
+    {
+      description: "Unsubscribe from updates for a specific resource",
+      inputSchema: {
+        server: z.string().describe("Name of the backend server"),
+        uri: z.string().describe("URI of the resource to unsubscribe from"),
+      },
+    },
+    async ({ server: serverName, uri }, extra): Promise<ToolResponse> => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      try {
+        const client = await sessionManager.getOrCreateConnection(session.sessionId, serverName);
+
+        // Check if server supports subscriptions
+        if (!client.supportsResourceSubscriptions()) {
+          return toolError(`Server '${serverName}' does not support resource subscriptions`);
+        }
+
+        await client.unsubscribeResource(uri);
+        return toolSuccess(`Unsubscribed from resource '${uri}' on server '${serverName}'`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return toolError(`Failed to unsubscribe from resource: ${message}`);
+      }
+    }
+  );
+
   // ---------------------------------------------------------------------------
   // Prompt Tools
   // ---------------------------------------------------------------------------
@@ -785,6 +849,31 @@ function registerTools(
     }
   );
 
+  server.registerTool(
+    "cancel_sampling_request",
+    {
+      description: "Cancel a pending sampling request without responding. Use this when you want to ignore a request or if it seems to be part of a loop.",
+      inputSchema: {
+        request_id: z.string().describe("The ID of the sampling request to cancel"),
+        reason: z.string().default("User cancelled").describe("Optional reason for cancellation"),
+      },
+    },
+    ({ request_id, reason }, extra): ToolResponse => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      try {
+        session.pendingRequests.cancelSampling(request_id, reason);
+        return toolSuccess(`Cancelled sampling request '${request_id}'`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return toolError(`Failed to cancel: ${message}`);
+      }
+    }
+  );
+
   // ---------------------------------------------------------------------------
   // Elicitation Tools (User input requests from backends)
   // ---------------------------------------------------------------------------
@@ -849,6 +938,31 @@ function registerTools(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to respond: ${message}`);
+      }
+    }
+  );
+
+  server.registerTool(
+    "cancel_elicitation_request",
+    {
+      description: "Cancel a pending elicitation request without responding.",
+      inputSchema: {
+        request_id: z.string().describe("The ID of the elicitation request to cancel"),
+        reason: z.string().default("User cancelled").describe("Optional reason for cancellation"),
+      },
+    },
+    ({ request_id, reason }, extra): ToolResponse => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      try {
+        session.pendingRequests.cancelElicitation(request_id, reason);
+        return toolSuccess(`Cancelled elicitation request '${request_id}'`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return toolError(`Failed to cancel: ${message}`);
       }
     }
   );
@@ -1294,7 +1408,7 @@ function main(): void {
     console.log("\nAvailable tools:");
     console.log("  Server management: add_server, remove_server, reconnect_server, list_servers");
     console.log("  Tools: list_tools, execute_tool");
-    console.log("  Resources: list_resources, read_resource");
+    console.log("  Resources: list_resources, list_resource_templates, read_resource, subscribe_resource, unsubscribe_resource");
     console.log("  Prompts: list_prompts, get_prompt");
     console.log("  Notifications: get_notifications, get_logs");
     console.log("  Sampling: get_sampling_requests, respond_to_sampling");

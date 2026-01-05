@@ -89,6 +89,8 @@ emceepee exposes a **static set of tools** that never change. These tools provid
 | `list_resources` | List available resources |
 | `list_resource_templates` | List resource templates |
 | `read_resource` | Fetch a resource by URI |
+| `subscribe_resource` | Subscribe to resource change notifications |
+| `unsubscribe_resource` | Unsubscribe from resource change notifications |
 
 ### Prompts
 | Tool | Description |
