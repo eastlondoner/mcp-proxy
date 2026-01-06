@@ -36,7 +36,9 @@ export type ProxyEventType =
   | "server_removed"
   // Health check events
   | "server_health_degraded"
-  | "server_health_restored";
+  | "server_health_restored"
+  // Timer events
+  | "timer_expired";
 
 /**
  * A stored event with metadata

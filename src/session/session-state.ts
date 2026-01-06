@@ -28,6 +28,10 @@ import {
   PendingRequestsManager,
   type PendingRequestsConfig,
 } from "../state/pending-requests.js";
+import {
+  TimerManager,
+  type TimerManagerConfig,
+} from "../state/timer-manager.js";
 
 /**
  * Configuration for session state
@@ -41,6 +45,8 @@ export interface SessionStateConfig {
   bufferConfig?: Partial<BufferManagerConfig>;
   /** Event system configuration */
   eventSystemConfig?: Partial<EventSystemConfig>;
+  /** Timer manager configuration */
+  timerConfig?: Partial<TimerManagerConfig>;
 }
 
 /**
@@ -71,6 +77,7 @@ export interface BackendConnection {
  * - TaskManager (for timeout-promoted proxy tasks)
  * - PendingRequestsManager (for elicitation/sampling)
  * - BufferManager (for notifications/logs)
+ * - TimerManager (for scheduled notifications)
  */
 export class SessionState {
   /** Unique session identifier (ULID) */
@@ -97,6 +104,9 @@ export class SessionState {
   /** Per-session BufferManager (uses this session's EventSystem) */
   public readonly bufferManager: BufferManager;
 
+  /** Per-session TimerManager (uses this session's EventSystem) */
+  public readonly timerManager: TimerManager;
+
   /** Logger for this session */
   private readonly logger?: StructuredLogger;
 
@@ -117,6 +127,7 @@ export class SessionState {
     this.taskManager = new TaskManager(this.eventSystem, config.taskConfig);
     this.pendingRequests = new PendingRequestsManager(this.eventSystem, config.requestConfig);
     this.bufferManager = new BufferManager(this.eventSystem, config.bufferConfig);
+    this.timerManager = new TimerManager(this.eventSystem, config.timerConfig);
   }
 
   /**
@@ -218,10 +229,13 @@ export class SessionState {
     // 2. Shutdown task manager (clears timers)
     this.taskManager.shutdown();
 
-    // 3. Shutdown event system (clears timers, resolves waiters)
+    // 3. Shutdown timer manager (clears timeouts)
+    this.timerManager.shutdown();
+
+    // 4. Shutdown event system (clears timers, resolves waiters)
     this.eventSystem.shutdown();
 
-    // 4. Disconnect all backend connections
+    // 5. Disconnect all backend connections
     for (const [name, conn] of this.backendConnections) {
       try {
         await conn.client.disconnect();

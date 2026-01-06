@@ -33,3 +33,11 @@ export type {
   ElicitationRequestInfo,
   PendingRequestsConfig,
 } from "./pending-requests.js";
+
+export { TimerManager } from "./timer-manager.js";
+export type {
+  Timer,
+  TimerStatus,
+  ExpiredTimer,
+  TimerManagerConfig,
+} from "./timer-manager.js";

@@ -124,6 +124,38 @@ emceepee exposes a **static set of tools** that never change. These tools provid
 | `cancel_task` | Cancel a running task |
 | `await_activity` | Wait for server events (polling) |
 
+### Timers
+| Tool | Description |
+|------|-------------|
+| `set_timer` | Create a timer that fires after a duration |
+| `list_timers` | List all timers |
+| `get_timer` | Get timer details |
+| `delete_timer` | Delete a timer (returns timer body) |
+
+## Context Info
+
+Every tool response may include additional context information as a second JSON text block. This provides real-time status without requiring explicit polling:
+
+```json
+{
+  "content": [
+    { "type": "text", "text": "Tool result here" },
+    { "type": "text", "text": "{\"pending_client\":{\"sampling\":1,\"elicitation\":0},\"expired_timers\":[{\"id\":\"...\",\"message\":\"Check status\",\"expiredAt\":\"...\"}],\"notifications\":[...]}" }
+  ]
+}
+```
+
+**Context info fields:**
+
+| Field | Description |
+|-------|-------------|
+| `pending_client.sampling` | Number of pending sampling requests (urgent - servers are blocked) |
+| `pending_client.elicitation` | Number of pending elicitation requests (urgent - servers are blocked) |
+| `expired_timers` | Timers that have fired since the last tool call (cleared after delivery) |
+| `notifications` | Buffered notifications from backend servers (cleared after delivery) |
+
+Context info is only included when there's something to report.
+
 ## Installation
 
 ```bash

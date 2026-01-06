@@ -108,8 +108,102 @@ function getSessionForTool(
   return sessionManager.getSession(ourSessionId);
 }
 
+// =============================================================================
+// Context Info Wrapper
+// =============================================================================
+
 /**
- * Create a tool error response
+ * Context info structure appended to tool responses.
+ * Only included when there's something to report.
+ */
+interface ContextInfo {
+  pending_client?: {
+    sampling: number;
+    elicitation: number;
+  };
+  expired_timers?: {
+    id: string;
+    message: string;
+    expiredAt: string;
+  }[];
+  notifications?: {
+    server: string;
+    method: string;
+    timestamp: string;
+    params?: unknown;
+  }[];
+}
+
+/**
+ * Build context info from session state.
+ * Returns null if there's nothing to report.
+ */
+function buildContextInfo(session: SessionState): ContextInfo | null {
+  const samplingCount = session.pendingRequests.getPendingSamplingRequests().length;
+  const elicitationCount = session.pendingRequests.getPendingElicitationRequests().length;
+  const expiredTimers = session.timerManager.getAndClearExpired();
+  const notifications = session.bufferManager.getAndClearNotifications();
+
+  // Only return if there's something to report
+  const hasPending = samplingCount > 0 || elicitationCount > 0;
+  const hasTimers = expiredTimers.length > 0;
+  const hasNotifications = notifications.length > 0;
+
+  if (!hasPending && !hasTimers && !hasNotifications) {
+    return null;
+  }
+
+  const context: ContextInfo = {};
+
+  if (hasPending) {
+    context.pending_client = {
+      sampling: samplingCount,
+      elicitation: elicitationCount,
+    };
+  }
+
+  if (hasTimers) {
+    context.expired_timers = expiredTimers;
+  }
+
+  if (hasNotifications) {
+    context.notifications = notifications.map((n) => ({
+      server: n.server,
+      method: n.method,
+      timestamp: n.timestamp.toISOString(),
+      params: n.params,
+    }));
+  }
+
+  return context;
+}
+
+/**
+ * Wrap a tool response with context info.
+ * Appends context as an additional JSON text block if there's anything to report.
+ */
+function wrapWithContext(response: ToolResponse, session: SessionState | undefined): ToolResponse {
+  if (!session) return response;
+
+  const context = buildContextInfo(session);
+  if (!context) return response;
+
+  return {
+    ...response,
+    content: [
+      ...response.content,
+      { type: "text", text: JSON.stringify(context) },
+    ],
+  };
+}
+
+// =============================================================================
+// Tool Response Helpers
+// =============================================================================
+
+/**
+ * Create a tool error response.
+ * Note: Errors don't get context info - if session is missing, there's nothing to report.
  */
 function toolError(message: string): ToolResponse {
   return {
@@ -119,21 +213,23 @@ function toolError(message: string): ToolResponse {
 }
 
 /**
- * Create a tool success response
+ * Create a tool success response with optional context info.
  */
-function toolSuccess(message: string): ToolResponse {
-  return {
+function toolSuccess(message: string, session?: SessionState): ToolResponse {
+  const response: ToolResponse = {
     content: [{ type: "text", text: message }],
   };
+  return wrapWithContext(response, session);
 }
 
 /**
- * Create a JSON tool response
+ * Create a JSON tool response with optional context info.
  */
-function toolJson(data: unknown): ToolResponse {
-  return {
+function toolJson(data: unknown, session?: SessionState): ToolResponse {
+  const response: ToolResponse = {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
   };
+  return wrapWithContext(response, session);
 }
 
 // =============================================================================
@@ -170,7 +266,8 @@ function registerTools(
         const capabilities = connection.client.getInfo().capabilities;
         return toolSuccess(
           `Connected to server '${name}' at ${url}\n` +
-          `Capabilities: ${JSON.stringify(capabilities)}`
+          `Capabilities: ${JSON.stringify(capabilities)}`,
+          session
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -195,7 +292,7 @@ function registerTools(
 
       try {
         await sessionManager.removeServer(session.sessionId, name);
-        return toolSuccess(`Disconnected from server '${name}'`);
+        return toolSuccess(`Disconnected from server '${name}'`, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to remove server: ${message}`);
@@ -219,7 +316,7 @@ function registerTools(
 
       try {
         await sessionManager.reconnectServer(session.sessionId, name);
-        return toolSuccess(`Reconnected to server '${name}'`);
+        return toolSuccess(`Reconnected to server '${name}'`, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to reconnect: ${message}`);
@@ -241,7 +338,7 @@ function registerTools(
 
       const servers = sessionManager.listServers(session.sessionId);
       if (servers.length === 0) {
-        return toolSuccess("No servers configured");
+        return toolSuccess("No servers configured", session);
       }
 
       const formatted = servers.map((s) => {
@@ -271,7 +368,7 @@ function registerTools(
         return result;
       });
 
-      return toolJson(formatted);
+      return toolJson(formatted, session);
     }
   );
 
@@ -330,10 +427,10 @@ function registerTools(
         }
 
         if (allTools.length === 0) {
-          return toolSuccess("No tools available");
+          return toolSuccess("No tools available", session);
         }
 
-        return toolJson(allTools);
+        return toolJson(allTools, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to list tools: ${message}`);
@@ -384,6 +481,17 @@ function registerTools(
         requestTracker.completeRequest(requestId, summary);
 
         // Pass through the result content directly, preserving all content types
+        // Wrap with context info - cast to any to avoid type issues with backend content types
+        const context = buildContextInfo(session);
+        if (context) {
+          return {
+            content: [
+              ...result.content,
+              { type: "text" as const, text: JSON.stringify(context) },
+            ],
+            isError: result.isError,
+          };
+        }
         return {
           content: result.content,
           isError: result.isError,
@@ -448,10 +556,10 @@ function registerTools(
         }
 
         if (resources.length === 0) {
-          return toolSuccess("No resources available");
+          return toolSuccess("No resources available", session);
         }
 
-        return toolJson(resources);
+        return toolJson(resources, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to list resources: ${message}`);
@@ -507,10 +615,10 @@ function registerTools(
         }
 
         if (templates.length === 0) {
-          return toolSuccess("No resource templates available");
+          return toolSuccess("No resource templates available", session);
         }
 
-        return toolJson(templates);
+        return toolJson(templates, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to list resource templates: ${message}`);
@@ -556,7 +664,7 @@ function registerTools(
         });
 
         requestTracker.completeRequest(requestId, `${String(contents.length)} content(s)`);
-        return toolJson({ contents });
+        return toolJson({ contents }, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         requestTracker.failRequest(requestId, message);
@@ -589,7 +697,7 @@ function registerTools(
         }
 
         await client.subscribeResource(uri);
-        return toolSuccess(`Subscribed to resource '${uri}' on server '${serverName}'`);
+        return toolSuccess(`Subscribed to resource '${uri}' on server '${serverName}'`, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to subscribe to resource: ${message}`);
@@ -621,7 +729,7 @@ function registerTools(
         }
 
         await client.unsubscribeResource(uri);
-        return toolSuccess(`Unsubscribed from resource '${uri}' on server '${serverName}'`);
+        return toolSuccess(`Unsubscribed from resource '${uri}' on server '${serverName}'`, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to unsubscribe from resource: ${message}`);
@@ -679,10 +787,10 @@ function registerTools(
         }
 
         if (prompts.length === 0) {
-          return toolSuccess("No prompts available");
+          return toolSuccess("No prompts available", session);
         }
 
-        return toolJson(prompts);
+        return toolJson(prompts, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to list prompts: ${message}`);
@@ -709,7 +817,7 @@ function registerTools(
       try {
         const client = await sessionManager.getOrCreateConnection(session.sessionId, serverName);
         const result = await client.getPrompt(name, promptArgs ?? {});
-        return toolJson(result);
+        return toolJson(result, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to get prompt: ${message}`);
@@ -735,7 +843,7 @@ function registerTools(
 
       const notifications = session.bufferManager.getAndClearNotifications();
       if (notifications.length === 0) {
-        return toolSuccess("No notifications");
+        return toolSuccess("No notifications", session);
       }
 
       const formatted = notifications.map((n) => ({
@@ -745,7 +853,7 @@ function registerTools(
         params: n.params,
       }));
 
-      return toolJson(formatted);
+      return toolJson(formatted, session);
     }
   );
 
@@ -763,7 +871,7 @@ function registerTools(
 
       const logs = session.bufferManager.getAndClearLogs();
       if (logs.length === 0) {
-        return toolSuccess("No log messages");
+        return toolSuccess("No log messages", session);
       }
 
       const formatted = logs.map((l) => ({
@@ -774,7 +882,7 @@ function registerTools(
         data: l.data,
       }));
 
-      return toolJson(formatted);
+      return toolJson(formatted, session);
     }
   );
 
@@ -796,7 +904,7 @@ function registerTools(
 
       const requests = session.pendingRequests.getPendingSamplingRequests();
       if (requests.length === 0) {
-        return toolSuccess("No pending sampling requests");
+        return toolSuccess("No pending sampling requests", session);
       }
 
       const formatted = requests.map((r) => ({
@@ -811,7 +919,7 @@ function registerTools(
         tools: r.params.tools?.map((t) => ({ name: t.name, description: t.description })),
       }));
 
-      return toolJson(formatted);
+      return toolJson(formatted, session);
     }
   );
 
@@ -841,7 +949,7 @@ function registerTools(
           model,
           stopReason: stop_reason,
         });
-        return toolSuccess(`Responded to sampling request '${request_id}'`);
+        return toolSuccess(`Responded to sampling request '${request_id}'`, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to respond: ${message}`);
@@ -866,7 +974,7 @@ function registerTools(
 
       try {
         session.pendingRequests.cancelSampling(request_id, reason);
-        return toolSuccess(`Cancelled sampling request '${request_id}'`);
+        return toolSuccess(`Cancelled sampling request '${request_id}'`, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to cancel: ${message}`);
@@ -892,7 +1000,7 @@ function registerTools(
 
       const requests = session.pendingRequests.getPendingElicitationRequests();
       if (requests.length === 0) {
-        return toolSuccess("No pending elicitation requests");
+        return toolSuccess("No pending elicitation requests", session);
       }
 
       const formatted = requests.map((r) => ({
@@ -906,7 +1014,7 @@ function registerTools(
         url: "url" in r.params ? r.params.url : undefined,
       }));
 
-      return toolJson(formatted);
+      return toolJson(formatted, session);
     }
   );
 
@@ -934,7 +1042,7 @@ function registerTools(
           action,
           content,
         });
-        return toolSuccess(`Responded to elicitation request '${request_id}' with action '${action}'`);
+        return toolSuccess(`Responded to elicitation request '${request_id}' with action '${action}'`, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to respond: ${message}`);
@@ -959,7 +1067,7 @@ function registerTools(
 
       try {
         session.pendingRequests.cancelElicitation(request_id, reason);
-        return toolSuccess(`Cancelled elicitation request '${request_id}'`);
+        return toolSuccess(`Cancelled elicitation request '${request_id}'`, session);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to cancel: ${message}`);
@@ -1016,7 +1124,7 @@ function registerTools(
             sampling: session.pendingRequests.getPendingSamplingRequests().length,
             elicitation: session.pendingRequests.getPendingElicitationRequests().length,
           },
-        });
+        }, session);
       }
 
       // Wait for new activity
@@ -1046,7 +1154,7 @@ function registerTools(
             sampling: session.pendingRequests.getPendingSamplingRequests().length,
             elicitation: session.pendingRequests.getPendingElicitationRequests().length,
           },
-        });
+        }, session);
       }
 
       // Timeout - return current state
@@ -1065,7 +1173,7 @@ function registerTools(
           sampling: session.pendingRequests.getPendingSamplingRequests().length,
           elicitation: session.pendingRequests.getPendingElicitationRequests().length,
         },
-      });
+      }, session);
     }
   );
 
@@ -1097,7 +1205,7 @@ function registerTools(
       }
 
       if (tasks.length === 0) {
-        return toolSuccess("No tasks");
+        return toolSuccess("No tasks", session);
       }
 
       const formatted = tasks.map((t) => ({
@@ -1111,7 +1219,7 @@ function registerTools(
         hasResult: t.result !== undefined,
       }));
 
-      return toolJson(formatted);
+      return toolJson(formatted, session);
     }
   );
 
@@ -1145,7 +1253,7 @@ function registerTools(
         ttl: task.ttl,
         error: task.error,
         result: task.result,
-      });
+      }, session);
     }
   );
 
@@ -1165,10 +1273,143 @@ function registerTools(
 
       const cancelled = session.taskManager.cancelTask(task_id);
       if (cancelled) {
-        return toolSuccess(`Task '${task_id}' cancelled`);
+        return toolSuccess(`Task '${task_id}' cancelled`, session);
       } else {
         return toolError(`Task '${task_id}' not found or not in working state`);
       }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Timer Tools
+  // ---------------------------------------------------------------------------
+
+  server.registerTool(
+    "set_timer",
+    {
+      description: "Set a timer that will fire after a specified duration. When the timer expires, you'll receive a notification in the context info of subsequent tool responses, and it will also appear as a timer_expired event in await_activity.",
+      inputSchema: {
+        duration_ms: z.number().min(1).max(86400000)
+          .describe("Duration in milliseconds until the timer fires (max 24 hours)"),
+        message: z.string().min(1).max(500)
+          .describe("Message to include in the notification when the timer fires"),
+      },
+    },
+    ({ duration_ms, message }, extra): ToolResponse => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      try {
+        const timer = session.timerManager.createTimer(duration_ms, message);
+        return toolJson({
+          timerId: timer.id,
+          message: timer.message,
+          durationMs: timer.durationMs,
+          createdAt: timer.createdAt.toISOString(),
+          expiresAt: timer.expiresAt.toISOString(),
+        }, session);
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        return toolError(`Failed to set timer: ${errorMessage}`);
+      }
+    }
+  );
+
+  server.registerTool(
+    "list_timers",
+    {
+      description: "List all timers for this session",
+      inputSchema: {
+        include_inactive: z.boolean().default(false)
+          .describe("Include expired and deleted timers (default: false, only active timers)"),
+      },
+    },
+    ({ include_inactive }, extra): ToolResponse => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      const timers = session.timerManager.getAllTimers(include_inactive);
+      if (timers.length === 0) {
+        return toolSuccess("No timers", session);
+      }
+
+      const formatted = timers.map((t) => ({
+        id: t.id,
+        message: t.message,
+        durationMs: t.durationMs,
+        status: t.status,
+        createdAt: t.createdAt.toISOString(),
+        expiresAt: t.expiresAt.toISOString(),
+      }));
+
+      return toolJson(formatted, session);
+    }
+  );
+
+  server.registerTool(
+    "get_timer",
+    {
+      description: "Get details of a specific timer",
+      inputSchema: {
+        timer_id: z.string().describe("The timer ID to retrieve"),
+      },
+    },
+    ({ timer_id }, extra): ToolResponse => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      const timer = session.timerManager.getTimer(timer_id);
+      if (!timer) {
+        return toolError(`Timer '${timer_id}' not found`);
+      }
+
+      return toolJson({
+        id: timer.id,
+        message: timer.message,
+        durationMs: timer.durationMs,
+        status: timer.status,
+        createdAt: timer.createdAt.toISOString(),
+        expiresAt: timer.expiresAt.toISOString(),
+      }, session);
+    }
+  );
+
+  server.registerTool(
+    "delete_timer",
+    {
+      description: "Delete a timer. Returns the timer details before deletion.",
+      inputSchema: {
+        timer_id: z.string().describe("The timer ID to delete"),
+      },
+    },
+    ({ timer_id }, extra): ToolResponse => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      const timer = session.timerManager.deleteTimer(timer_id);
+      if (!timer) {
+        return toolError(`Timer '${timer_id}' not found`);
+      }
+
+      return toolJson({
+        deleted: true,
+        timer: {
+          id: timer.id,
+          message: timer.message,
+          durationMs: timer.durationMs,
+          status: timer.status,
+          createdAt: timer.createdAt.toISOString(),
+          expiresAt: timer.expiresAt.toISOString(),
+        },
+      }, session);
     }
   );
 }
