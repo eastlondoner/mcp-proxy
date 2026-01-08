@@ -26,10 +26,14 @@ export interface Timer {
   message: string;
   /** When the timer was created */
   createdAt: Date;
-  /** When the timer will/did expire */
+  /** When the timer will/did expire (or next fire for intervals) */
   expiresAt: Date;
   /** Current status */
   status: TimerStatus;
+  /** If true, timer repeats at the specified interval */
+  interval: boolean;
+  /** Number of times this timer has fired (for interval timers) */
+  fireCount: number;
 }
 
 /**
@@ -38,6 +42,8 @@ export interface Timer {
 interface InternalTimer extends Timer {
   /** setTimeout handle for cleanup */
   _timeoutHandle?: NodeJS.Timeout;
+  /** setInterval handle for repeating timers */
+  _intervalHandle?: NodeJS.Timeout;
 }
 
 /**
@@ -92,10 +98,11 @@ export class TimerManager {
    *
    * @param durationMs - How long until the timer fires (in milliseconds)
    * @param message - Message to include in the notification
+   * @param interval - If true, timer repeats at the specified interval (default: false)
    * @returns The created timer
    * @throws Error if max timers exceeded or duration invalid
    */
-  public createTimer(durationMs: number, message: string): Timer {
+  public createTimer(durationMs: number, message: string, interval = false): Timer {
     // Validate
     const activeCount = this.getActiveTimers().length;
     if (activeCount >= this.config.maxActiveTimers) {
@@ -121,12 +128,21 @@ export class TimerManager {
       createdAt: now,
       expiresAt,
       status: "active",
+      interval,
+      fireCount: 0,
     };
 
-    // Set up the timeout
-    timer._timeoutHandle = setTimeout(() => {
-      this.expireTimer(id);
-    }, durationMs);
+    if (interval) {
+      // For interval timers, use setInterval for repeating fires
+      timer._intervalHandle = setInterval(() => {
+        this.fireIntervalTimer(id);
+      }, durationMs);
+    } else {
+      // For one-shot timers, use setTimeout
+      timer._timeoutHandle = setTimeout(() => {
+        this.expireTimer(id);
+      }, durationMs);
+    }
 
     this.timers.set(id, timer);
 
@@ -157,6 +173,12 @@ export class TimerManager {
     if (timer._timeoutHandle) {
       clearTimeout(timer._timeoutHandle);
       timer._timeoutHandle = undefined;
+    }
+
+    // Clear interval if active
+    if (timer._intervalHandle) {
+      clearInterval(timer._intervalHandle);
+      timer._intervalHandle = undefined;
     }
 
     timer.status = "deleted";
@@ -209,12 +231,15 @@ export class TimerManager {
   }
 
   /**
-   * Shutdown the timer manager, clearing all timeouts.
+   * Shutdown the timer manager, clearing all timeouts and intervals.
    */
   public shutdown(): void {
     for (const timer of this.timers.values()) {
       if (timer._timeoutHandle) {
         clearTimeout(timer._timeoutHandle);
+      }
+      if (timer._intervalHandle) {
+        clearInterval(timer._intervalHandle);
       }
     }
     this.timers.clear();
@@ -222,7 +247,7 @@ export class TimerManager {
   }
 
   /**
-   * Handle timer expiration.
+   * Handle timer expiration (one-shot timers).
    */
   private expireTimer(id: string): void {
     const timer = this.timers.get(id);
@@ -230,6 +255,7 @@ export class TimerManager {
 
     timer.status = "expired";
     timer._timeoutHandle = undefined;
+    timer.fireCount++;
 
     // Add to expired buffer for context info delivery
     this.expiredBuffer.push({
@@ -246,6 +272,34 @@ export class TimerManager {
 
     // Schedule cleanup
     this.scheduleCleanup(timer);
+  }
+
+  /**
+   * Handle interval timer fire (repeating timers).
+   * Unlike expireTimer, this doesn't change status or schedule cleanup.
+   */
+  private fireIntervalTimer(id: string): void {
+    const timer = this.timers.get(id);
+    if (!timer?.status || timer.status !== "active") return;
+
+    timer.fireCount++;
+    // Update expiresAt to the next fire time
+    timer.expiresAt = new Date(Date.now() + timer.durationMs);
+
+    // Add to expired buffer for context info delivery
+    this.expiredBuffer.push({
+      id: timer.id,
+      message: timer.message,
+      expiredAt: new Date().toISOString(),
+    });
+
+    // Emit event for await_activity
+    this.eventSystem.addEvent("timer_expired", "emceepee", {
+      timerId: timer.id,
+      message: timer.message,
+      fireCount: timer.fireCount,
+      interval: true,
+    });
   }
 
   /**
@@ -268,6 +322,8 @@ export class TimerManager {
       createdAt: timer.createdAt,
       expiresAt: timer.expiresAt,
       status: timer.status,
+      interval: timer.interval,
+      fireCount: timer.fireCount,
     };
   }
 }

@@ -1293,20 +1293,23 @@ function registerTools(
           .describe("Duration in milliseconds until the timer fires (max 24 hours)"),
         message: z.string().min(1).max(500)
           .describe("Message to include in the notification when the timer fires"),
+        interval: z.boolean().default(false)
+          .describe("If true, timer repeats at the specified interval instead of firing once (default: false)"),
       },
     },
-    ({ duration_ms, message }, extra): ToolResponse => {
+    ({ duration_ms, message, interval }, extra): ToolResponse => {
       const session = getSessionForTool(sessionManager, extra, sessions);
       if (!session) {
         return toolError("Session not found");
       }
 
       try {
-        const timer = session.timerManager.createTimer(duration_ms, message);
+        const timer = session.timerManager.createTimer(duration_ms, message, interval);
         return toolJson({
           timerId: timer.id,
           message: timer.message,
           durationMs: timer.durationMs,
+          interval: timer.interval,
           createdAt: timer.createdAt.toISOString(),
           expiresAt: timer.expiresAt.toISOString(),
         }, session);
@@ -1342,6 +1345,8 @@ function registerTools(
         message: t.message,
         durationMs: t.durationMs,
         status: t.status,
+        interval: t.interval,
+        fireCount: t.fireCount,
         createdAt: t.createdAt.toISOString(),
         expiresAt: t.expiresAt.toISOString(),
       }));
@@ -1374,6 +1379,8 @@ function registerTools(
         message: timer.message,
         durationMs: timer.durationMs,
         status: timer.status,
+        interval: timer.interval,
+        fireCount: timer.fireCount,
         createdAt: timer.createdAt.toISOString(),
         expiresAt: timer.expiresAt.toISOString(),
       }, session);
@@ -1406,6 +1413,8 @@ function registerTools(
           message: timer.message,
           durationMs: timer.durationMs,
           status: timer.status,
+          interval: timer.interval,
+          fireCount: timer.fireCount,
           createdAt: timer.createdAt.toISOString(),
           expiresAt: timer.expiresAt.toISOString(),
         },
