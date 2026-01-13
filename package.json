@@ -43,6 +43,8 @@
     "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun run lint",
+    "test": "bun run test/stdio-client.test.ts",
+    "test:stdio": "bun run test/stdio-client.test.ts",
     "prepublishOnly": "bun run check && bun run build"
   },
   "dependencies": {

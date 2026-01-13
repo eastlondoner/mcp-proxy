@@ -35,7 +35,9 @@ import type {
   BufferedLog,
   PendingSamplingRequest,
   PendingElicitationRequest,
+  ServerTransportType,
 } from "./types.js";
+import type { IMCPClient } from "./client-interface.js";
 
 /**
  * Health status of the connection
@@ -93,7 +95,7 @@ const HEALTH_CHECK_JITTER_FACTOR = 0.1;    // 10% jitter
 const HEALTH_CHECK_TIMEOUT_MS = 60000;     // 60 seconds
 const HEALTH_CHECK_DEGRADED_THRESHOLD = 3; // 3 consecutive failures
 
-export class MCPHttpClient {
+export class MCPHttpClient implements IMCPClient {
   private readonly name: string;
   private readonly url: string;
   private readonly onStatusChange:
@@ -156,6 +158,7 @@ export class MCPHttpClient {
   public getInfo(): BackendServerInfo {
     const info: BackendServerInfo = {
       name: this.name,
+      transportType: "http" as ServerTransportType,
       url: this.url,
       status: this.status,
     };
@@ -169,6 +172,13 @@ export class MCPHttpClient {
     }
 
     return info;
+  }
+
+  /**
+   * Get the transport type
+   */
+  public getTransportType(): ServerTransportType {
+    return "http";
   }
 
   /**
@@ -555,6 +565,7 @@ export class MCPHttpClient {
             level: notification.params.level,
             logger: notification.params.logger,
             data: notification.params.data,
+            source: "protocol",
           });
         }
       }
@@ -833,11 +844,11 @@ export class MCPHttpClient {
         clearTimeout(timeoutId);
 
         if (this.consecutiveHealthFailures > 0) {
-          const wasDegraaded = this.healthStatus === "degraded";
+          const wasDegraded = this.healthStatus === "degraded";
           this.consecutiveHealthFailures = 0;
           this.healthStatus = "healthy";
 
-          if (wasDegraaded && this.onHealthRestored) {
+          if (wasDegraded && this.onHealthRestored) {
             this.onHealthRestored();
           }
         }

@@ -9,8 +9,12 @@
  * - Logs are Category 2 (on-demand, ring buffer)
  */
 
-import type { JSONRPCNotification, LoggingLevel } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCNotification } from "@modelcontextprotocol/sdk/types.js";
 import type { EventSystem } from "./event-system.js";
+import type { BufferedLog, LogSource } from "../types.js";
+
+// Re-export for convenience
+export type { BufferedLog, LogSource };
 
 /**
  * A buffered notification from a backend server
@@ -20,17 +24,6 @@ export interface BufferedNotification {
   timestamp: Date;
   method: string;
   params?: JSONRPCNotification["params"];
-}
-
-/**
- * A buffered log message from a backend server
- */
-export interface BufferedLog {
-  server: string;
-  timestamp: Date;
-  level: LoggingLevel;
-  logger?: string;
-  data?: unknown;
 }
 
 /**
