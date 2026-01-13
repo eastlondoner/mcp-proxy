@@ -1,8 +1,8 @@
 /**
- * Stdio MCP Client
+ * Stdio MCP Client Wrapper
  *
- * Provides a client for connecting to MCP servers via stdio transport.
- * Spawns a child process and communicates via stdin/stdout.
+ * Provides a wrapper around the MCP SDK Client with StdioClientTransport
+ * for spawning and managing MCP servers as child processes.
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,6 +16,8 @@ import type {
   GetPromptResult,
   ReadResourceResult,
   JSONRPCNotification,
+  CreateMessageResult,
+  ElicitResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   ToolListChangedNotificationSchema,
@@ -26,13 +28,6 @@ import {
   CreateMessageRequestSchema,
   ElicitRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Readable } from "stream";
-import type {
-  IMCPClient,
-  HealthStatus,
-  MCPClientOptionsBase,
-  MCPStdioClientOptionsExtension,
-} from "./client-interface.js";
 import type {
   BackendServerStatus,
   BackendServerInfo,
@@ -40,94 +35,144 @@ import type {
   BufferedLog,
   PendingSamplingRequest,
   PendingElicitationRequest,
-  StdioRestartConfig,
-  StdioLifecycleEvent,
-  StdioLifecycleEventData,
 } from "./types.js";
+import type { IStdioClient, HealthStatus } from "./client-interface.js";
+
+/**
+ * Log source types for stdio client
+ */
+export type LogSource = "protocol" | "stderr" | "stdout";
+
+/**
+ * Restart configuration for stdio clients
+ */
+export interface StdioRestartConfig {
+  /** Whether to automatically restart on crash (default: true) */
+  enabled?: boolean;
+  /** Maximum restart attempts before giving up (default: 5) */
+  maxAttempts?: number;
+  /** Base delay in ms before first restart (default: 1000) */
+  baseDelayMs?: number;
+  /** Maximum delay in ms between restarts (default: 60000) */
+  maxDelayMs?: number;
+  /** Backoff multiplier (default: 2) */
+  backoffMultiplier?: number;
+}
+
+/**
+ * Process lifecycle event types
+ */
+export type LifecycleEventType =
+  | "process_started"
+  | "process_crashed"
+  | "restarting"
+  | "restarted"
+  | "restart_failed"
+  | "process_stopped";
+
+/**
+ * Process lifecycle event
+ */
+export interface LifecycleEvent {
+  event: LifecycleEventType;
+  timestamp: Date;
+  exitCode?: number;
+  signal?: string;
+  attempt?: number;
+  nextRetryMs?: number;
+  error?: string;
+}
+
+/**
+ * Options for creating an MCPStdioClient
+ */
+export interface MCPStdioClientOptions {
+  /** Unique name for this backend server */
+  name: string;
+  /** Command to spawn */
+  command: string;
+  /** Command arguments */
+  args?: string[];
+  /** Environment variables (merged with process.env) */
+  env?: Record<string, string>;
+  /** Working directory for the spawned process */
+  cwd?: string;
+  /** Restart configuration */
+  restartConfig?: StdioRestartConfig;
+  /** Callback when the connection status changes */
+  onStatusChange?: (status: BackendServerStatus, error?: string) => void;
+  /** Callback when a notification is received from the server */
+  onNotification?: (notification: BufferedNotification) => void;
+  /** Callback when a log message is received (includes stderr capture) */
+  onLog?: (log: BufferedLog & { source: LogSource }) => void;
+  /** Callback when a sampling request is received from the server */
+  onSamplingRequest?: (request: PendingSamplingRequest) => void;
+  /** Callback when an elicitation request is received from the server */
+  onElicitationRequest?: (request: PendingElicitationRequest) => void;
+  /** Callback for lifecycle events */
+  onLifecycleEvent?: (event: LifecycleEvent) => void;
+}
 
 // Default restart configuration
-const DEFAULT_RESTART_CONFIG: StdioRestartConfig = {
+const DEFAULT_RESTART_CONFIG: Required<StdioRestartConfig> = {
   enabled: true,
   maxAttempts: 5,
   baseDelayMs: 1000,
   maxDelayMs: 60000,
   backoffMultiplier: 2,
-  resetAfterMs: 300000, // 5 minutes
 };
 
-// Health check constants (same as HTTP client)
-const HEALTH_CHECK_INTERVAL_MS = 120000;
-const HEALTH_CHECK_JITTER_FACTOR = 0.1;
-const HEALTH_CHECK_TIMEOUT_MS = 60000;
-const HEALTH_CHECK_DEGRADED_THRESHOLD = 3;
-
 /**
- * Options for creating an MCPStdioClient
+ * Stdio MCP Client wrapper for spawning and managing MCP server processes.
+ *
+ * Features:
+ * - Spawns MCP servers as child processes
+ * - Automatic crash recovery with exponential backoff
+ * - Stderr capture for debugging
+ * - Process lifecycle events
  */
-export interface MCPStdioClientOptions
-  extends MCPClientOptionsBase,
-    MCPStdioClientOptionsExtension {
-  /** Command to execute */
-  command: string;
-  /** Arguments to pass to the command */
-  args?: string[];
-  /** Environment variables for the process */
-  env?: Record<string, string>;
-  /** Working directory for the process */
-  cwd?: string;
-  /** Restart configuration */
-  restartConfig?: Partial<StdioRestartConfig>;
-}
-
-/**
- * Stdio MCP Client for connecting to backend MCP servers via process stdio.
- */
-export class MCPStdioClient implements IMCPClient {
+export class MCPStdioClient implements IStdioClient {
   private readonly name: string;
   private readonly command: string;
   private readonly args: string[];
   private readonly env?: Record<string, string>;
   private readonly cwd?: string;
-  private readonly restartConfig: StdioRestartConfig;
+  private readonly restartConfig: Required<StdioRestartConfig>;
+  private readonly onStatusChange:
+    | ((status: BackendServerStatus, error?: string) => void)
+    | undefined;
+  private readonly onNotification:
+    | ((notification: BufferedNotification) => void)
+    | undefined;
+  private readonly onLog:
+    | ((log: BufferedLog & { source: LogSource }) => void)
+    | undefined;
+  private readonly onSamplingRequest:
+    | ((request: PendingSamplingRequest) => void)
+    | undefined;
+  private readonly onElicitationRequest:
+    | ((request: PendingElicitationRequest) => void)
+    | undefined;
+  private readonly onLifecycleEvent:
+    | ((event: LifecycleEvent) => void)
+    | undefined;
 
-  // Callbacks
-  private readonly onStatusChange?: (status: BackendServerStatus, error?: string) => void;
-  private readonly onNotification?: (notification: BufferedNotification) => void;
-  private readonly onLog?: (log: BufferedLog) => void;
-  private readonly onSamplingRequest?: (request: PendingSamplingRequest) => void;
-  private readonly onElicitationRequest?: (request: PendingElicitationRequest) => void;
-  private readonly onReconnecting?: (attempt: number, nextRetryMs: number) => void;
-  private readonly onReconnected?: (attemptsTaken: number) => void;
-  private readonly onHealthDegraded?: (failures: number, lastError: string) => void;
-  private readonly onHealthRestored?: () => void;
-  private readonly onRestartFailed?: (attempts: number, lastError: string) => void;
-  private readonly onLifecycleEvent?: (event: StdioLifecycleEventData) => void;
-
-  // Client state
   private client: Client | null = null;
   private transport: StdioClientTransport | null = null;
   private status: BackendServerStatus = "disconnected";
   private errorMessage: string | undefined;
   private capabilities: BackendServerInfo["capabilities"] | undefined;
   private isClosing = false;
-  private startTime: Date | null = null;
 
   // Restart state
   private restartAttempt = 0;
-  private restartTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  private restartTimeoutHandle: NodeJS.Timeout | null = null;
   private nextRetryMs = 0;
   private isRestarting = false;
-  private lastRestartTime: Date | null = null;
-  private lastError: string | undefined;
 
-  // Health check state
-  private healthCheckIntervalHandle: ReturnType<typeof setTimeout> | null = null;
-  private consecutiveHealthFailures = 0;
-  private healthStatus: HealthStatus = "healthy";
-
-  // Process output buffers
+  // Stderr buffer
   private stderrBuffer: string[] = [];
-  private readonly maxBufferSize = 1000;
+  private readonly maxStderrLines = 1000;
 
   constructor(options: MCPStdioClientOptions) {
     this.name = options.name;
@@ -136,48 +181,26 @@ export class MCPStdioClient implements IMCPClient {
     this.env = options.env;
     this.cwd = options.cwd;
     this.restartConfig = { ...DEFAULT_RESTART_CONFIG, ...options.restartConfig };
-
-    // Callbacks
     this.onStatusChange = options.onStatusChange;
     this.onNotification = options.onNotification;
     this.onLog = options.onLog;
     this.onSamplingRequest = options.onSamplingRequest;
     this.onElicitationRequest = options.onElicitationRequest;
-    this.onReconnecting = options.onReconnecting;
-    this.onReconnected = options.onReconnected;
-    this.onHealthDegraded = options.onHealthDegraded;
-    this.onHealthRestored = options.onHealthRestored;
-    this.onRestartFailed = options.onRestartFailed;
     this.onLifecycleEvent = options.onLifecycleEvent;
   }
 
-  // ---------------------------------------------------------------------------
-  // IMCPClient Implementation - Status & Information
-  // ---------------------------------------------------------------------------
-
-  public getName(): string {
-    return this.name;
-  }
+  // =============================================================================
+  // IMCPClient Implementation
+  // =============================================================================
 
   public getTransportType(): "stdio" {
     return "stdio";
   }
 
-  public getStatus(): BackendServerStatus {
-    return this.status;
-  }
-
-  public isConnected(): boolean {
-    return this.status === "connected";
-  }
-
   public getInfo(): BackendServerInfo {
     const info: BackendServerInfo = {
       name: this.name,
-      transportType: "stdio",
-      command: this.command,
-      args: this.args,
-      pid: this.transport?.pid ?? undefined,
+      url: `stdio://${this.command}`,
       status: this.status,
     };
 
@@ -192,16 +215,20 @@ export class MCPStdioClient implements IMCPClient {
     return info;
   }
 
-  public getHealthStatus(): HealthStatus {
-    return this.healthStatus;
+  public getName(): string {
+    return this.name;
   }
 
-  public getConsecutiveHealthFailures(): number {
-    return this.consecutiveHealthFailures;
+  public getStatus(): BackendServerStatus {
+    return this.status;
+  }
+
+  public isConnected(): boolean {
+    return this.status === "connected";
   }
 
   public getReconnectionState(): { attempt: number; nextRetryMs: number } | null {
-    if (this.status !== "restarting") {
+    if (this.status !== "reconnecting") {
       return null;
     }
     return {
@@ -210,54 +237,34 @@ export class MCPStdioClient implements IMCPClient {
     };
   }
 
-  /**
-   * Get the process ID (if running)
-   */
-  public getPid(): number | null {
-    return this.transport?.pid ?? null;
+  public getHealthStatus(): HealthStatus {
+    // For stdio, health is based on process state
+    return this.isConnected() ? "healthy" : "degraded";
   }
 
-  /**
-   * Get the command used to start the server
-   */
+  public getConsecutiveHealthFailures(): number {
+    return this.isConnected() ? 0 : this.restartAttempt;
+  }
+
+  // =============================================================================
+  // IStdioClient Implementation
+  // =============================================================================
+
   public getCommand(): string {
     return this.command;
   }
 
-  /**
-   * Get the arguments passed to the command
-   */
   public getArgs(): string[] {
     return [...this.args];
   }
 
-  /**
-   * Get uptime in milliseconds (if running)
-   */
-  public getUptimeMs(): number | null {
-    if (!this.startTime || !this.isConnected()) {
-      return null;
-    }
-    return Date.now() - this.startTime.getTime();
-  }
-
-  /**
-   * Get the stderr buffer
-   */
   public getStderrBuffer(): string[] {
     return [...this.stderrBuffer];
   }
 
-  /**
-   * Get stderr buffer size
-   */
-  public getStderrBufferSize(): number {
-    return this.stderrBuffer.length;
-  }
-
-  // ---------------------------------------------------------------------------
-  // IMCPClient Implementation - Connection Management
-  // ---------------------------------------------------------------------------
+  // =============================================================================
+  // Connection Management
+  // =============================================================================
 
   public async connect(): Promise<void> {
     if (this.status === "connected" || this.status === "connecting") {
@@ -267,24 +274,9 @@ export class MCPStdioClient implements IMCPClient {
     this.setStatus("connecting");
 
     try {
-      this.createTransport();
-      await this.initializeMCP();
-
-      // Set up stderr capture after process is running
-      this.setupStderrCapture();
-
-      this.startTime = new Date();
+      await this.createTransport();
+      this.emitLifecycleEvent({ event: "process_started", timestamp: new Date() });
       this.setStatus("connected");
-
-      // Emit lifecycle event
-      this.emitLifecycleEvent("process_started", {
-        pid: this.transport?.pid ?? undefined,
-        command: this.command,
-        args: this.args,
-      });
-
-      // Start health checks
-      this.startHealthChecks();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.setStatus("error", message);
@@ -294,11 +286,6 @@ export class MCPStdioClient implements IMCPClient {
 
   public async disconnect(): Promise<void> {
     this.isClosing = true;
-    const pid = this.transport?.pid;
-    const uptimeMs = this.getUptimeMs();
-
-    // Stop health checks
-    this.stopHealthChecks();
 
     // Cancel any pending restart
     this.cancelReconnection();
@@ -314,24 +301,15 @@ export class MCPStdioClient implements IMCPClient {
     this.client = null;
     this.transport = null;
     this.isClosing = false;
-    this.startTime = null;
     this.setStatus("disconnected");
-
-    // Emit lifecycle event
-    this.emitLifecycleEvent("process_stopped", {
-      pid: pid ?? undefined,
-      uptimeMs: uptimeMs ?? undefined,
-    });
+    this.emitLifecycleEvent({ event: "process_stopped", timestamp: new Date() });
   }
 
   public async forceReconnect(): Promise<void> {
-    // Stop health checks
-    this.stopHealthChecks();
-
     // Cancel any pending restart
     this.cancelReconnection();
 
-    // Close existing connection if any
+    // Close existing connection
     if (this.transport) {
       this.isClosing = true;
       try {
@@ -349,11 +327,7 @@ export class MCPStdioClient implements IMCPClient {
     this.restartAttempt = 0;
     this.nextRetryMs = 0;
 
-    // Reset health state
-    this.consecutiveHealthFailures = 0;
-    this.healthStatus = "healthy";
-
-    // Connect (this will throw if it fails)
+    // Connect
     await this.connect();
   }
 
@@ -365,15 +339,16 @@ export class MCPStdioClient implements IMCPClient {
     this.isRestarting = false;
   }
 
-  // ---------------------------------------------------------------------------
-  // IMCPClient Implementation - MCP Operations
-  // ---------------------------------------------------------------------------
+  // =============================================================================
+  // MCP Operations
+  // =============================================================================
 
   public async listTools(): Promise<Tool[]> {
     const client = this.getConnectedClient();
     if (!this.capabilities?.tools) {
       return [];
     }
+
     const result = await client.listTools();
     return result.tools;
   }
@@ -383,10 +358,12 @@ export class MCPStdioClient implements IMCPClient {
     args: Record<string, unknown> = {}
   ): Promise<CallToolResult> {
     const client = this.getConnectedClient();
+
     const result = await client.callTool({
       name,
       arguments: args,
     });
+
     return result as CallToolResult;
   }
 
@@ -395,6 +372,7 @@ export class MCPStdioClient implements IMCPClient {
     if (!this.capabilities?.resources) {
       return [];
     }
+
     const result = await client.listResources();
     return result.resources;
   }
@@ -404,6 +382,7 @@ export class MCPStdioClient implements IMCPClient {
     if (!this.capabilities?.resourceTemplates) {
       return [];
     }
+
     const result = await client.listResourceTemplates();
     return result.resourceTemplates;
   }
@@ -416,21 +395,25 @@ export class MCPStdioClient implements IMCPClient {
 
   public async subscribeResource(uri: string): Promise<void> {
     const client = this.getConnectedClient();
+
     if (!this.capabilities?.resourceSubscriptions) {
       throw new Error(
         `Server '${this.name}' does not support resource subscriptions`
       );
     }
+
     await client.subscribeResource({ uri });
   }
 
   public async unsubscribeResource(uri: string): Promise<void> {
     const client = this.getConnectedClient();
+
     if (!this.capabilities?.resourceSubscriptions) {
       throw new Error(
         `Server '${this.name}' does not support resource subscriptions`
       );
     }
+
     await client.unsubscribeResource({ uri });
   }
 
@@ -443,6 +426,7 @@ export class MCPStdioClient implements IMCPClient {
     if (!this.capabilities?.prompts) {
       return [];
     }
+
     const result = await client.listPrompts();
     return result.prompts;
   }
@@ -452,59 +436,45 @@ export class MCPStdioClient implements IMCPClient {
     args: Record<string, string> = {}
   ): Promise<GetPromptResult> {
     const client = this.getConnectedClient();
+
     const result = await client.getPrompt({
       name,
       arguments: args,
     });
+
     return result;
   }
 
-  // ---------------------------------------------------------------------------
-  // Private Methods - Process Management
-  // ---------------------------------------------------------------------------
+  // =============================================================================
+  // Private Methods
+  // =============================================================================
 
   /**
-   * Create the transport for the server process
-   * Note: The process is actually spawned when client.connect() is called
+   * Create transport and connect to the spawned process
    */
-  private createTransport(): void {
-    // Create the transport with stderr capture
+  private async createTransport(): Promise<void> {
+    // Merge environment variables, filtering out undefined values from process.env
+    let mergedEnv: Record<string, string> | undefined;
+    if (this.env) {
+      mergedEnv = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (value !== undefined) {
+          mergedEnv[key] = value;
+        }
+      }
+      Object.assign(mergedEnv, this.env);
+    }
+
+    // Create the transport
     this.transport = new StdioClientTransport({
       command: this.command,
       args: this.args,
-      env: this.env,
+      env: mergedEnv,
       cwd: this.cwd,
       stderr: "pipe", // Capture stderr
     });
 
-    // Set up process event handlers (stderr capture is set up after connect)
-    this.transport.onclose = (): void => {
-      if (!this.isClosing) {
-        this.handleProcessCrash();
-      }
-    };
-
-    this.transport.onerror = (error): void => {
-      if (this.isClosing || this.status === "disconnected") {
-        return;
-      }
-      this.lastError = error.message;
-      this.errorMessage = error.message;
-      this.handleProcessCrash();
-    };
-
-    // Note: Don't call transport.start() here - Client.connect() will do that
-  }
-
-  /**
-   * Initialize the MCP connection
-   */
-  private async initializeMCP(): Promise<void> {
-    if (!this.transport) {
-      throw new Error("Transport not initialized");
-    }
-
-    // Create the client
+    // Create the client with capabilities for receiving server requests
     this.client = new Client(
       {
         name: "emceepee",
@@ -523,8 +493,26 @@ export class MCPStdioClient implements IMCPClient {
     // Set up notification handler before connecting
     this.setupNotificationHandler();
 
-    // Connect and initialize
+    // Set up transport event handlers
+    this.transport.onclose = (): void => {
+      if (!this.isClosing) {
+        this.handleProcessExit();
+      }
+    };
+
+    this.transport.onerror = (error): void => {
+      if (this.isClosing || this.status === "disconnected") {
+        return;
+      }
+      this.errorMessage = error.message;
+      this.handleProcessExit();
+    };
+
+    // Connect (this starts the process)
     await this.client.connect(this.transport);
+
+    // Set up stderr capture after connection
+    this.setupStderrCapture();
 
     // Get server capabilities
     const serverCapabilities = this.client.getServerCapabilities();
@@ -538,43 +526,153 @@ export class MCPStdioClient implements IMCPClient {
   }
 
   /**
-   * Set up stderr capture
+   * Set up stderr capture from the spawned process
    */
   private setupStderrCapture(): void {
-    const stderr = this.transport?.stderr as Readable | null;
-    if (!stderr) return;
+    if (!this.transport) return;
 
-    stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString().trim();
-      if (!text) return;
+    // Access the underlying process stderr
+    const proc = (this.transport as unknown as { _process?: { stderr?: NodeJS.ReadableStream } })._process;
+    if (proc?.stderr) {
+      proc.stderr.on("data", (data: Buffer) => {
+        const lines = data.toString().split("\n").filter((line) => line.length > 0);
+        for (const line of lines) {
+          // Add to buffer
+          this.stderrBuffer.push(line);
+          if (this.stderrBuffer.length > this.maxStderrLines) {
+            this.stderrBuffer.shift();
+          }
 
-      // Split by newlines
-      const lines = text.split("\n").filter((line) => line.trim());
-
-      for (const line of lines) {
-        // Add to buffer (ring buffer)
-        this.stderrBuffer.push(line);
-        if (this.stderrBuffer.length > this.maxBufferSize) {
-          this.stderrBuffer.shift();
+          // Emit as log
+          if (this.onLog) {
+            this.onLog({
+              server: this.name,
+              timestamp: new Date(),
+              level: "warning",
+              source: "stderr",
+              data: line,
+            });
+          }
         }
-
-        // Forward to log system
-        if (this.onLog) {
-          this.onLog({
-            server: this.name,
-            timestamp: new Date(),
-            level: "debug",
-            logger: "process:stderr",
-            data: line,
-            source: "stderr",
-          });
-        }
-      }
-    });
+      });
+    }
   }
 
   /**
-   * Set up notification handlers
+   * Handle process exit (crash or termination)
+   */
+  private handleProcessExit(exitCode?: number, signal?: string): void {
+    if (this.isRestarting || this.isClosing) {
+      return;
+    }
+
+    // Emit crash event
+    this.emitLifecycleEvent({
+      event: "process_crashed",
+      timestamp: new Date(),
+      exitCode,
+      signal,
+    });
+
+    // Clean up
+    this.client = null;
+    this.transport = null;
+
+    // Start restart process if enabled
+    if (this.restartConfig.enabled) {
+      this.isRestarting = true;
+      this.restartAttempt = 0;
+      this.setStatus("reconnecting", this.errorMessage);
+      this.scheduleRestart();
+    } else {
+      this.setStatus("error", `Process exited with code ${exitCode !== undefined ? String(exitCode) : "unknown"}`);
+    }
+  }
+
+  /**
+   * Schedule the next restart attempt with exponential backoff
+   */
+  private scheduleRestart(): void {
+    if (this.isClosing) {
+      return;
+    }
+
+    this.restartAttempt++;
+
+    if (this.restartAttempt > this.restartConfig.maxAttempts) {
+      // Max attempts exceeded
+      this.isRestarting = false;
+      this.setStatus("error", "Max restart attempts exceeded");
+      this.emitLifecycleEvent({
+        event: "restart_failed",
+        timestamp: new Date(),
+        attempt: this.restartAttempt - 1,
+        error: "Max restart attempts exceeded",
+      });
+      return;
+    }
+
+    const delay = this.calculateBackoff(this.restartAttempt);
+    this.nextRetryMs = delay;
+
+    this.emitLifecycleEvent({
+      event: "restarting",
+      timestamp: new Date(),
+      attempt: this.restartAttempt,
+      nextRetryMs: delay,
+    });
+
+    this.restartTimeoutHandle = setTimeout(() => {
+      void this.attemptRestart();
+    }, delay);
+  }
+
+  /**
+   * Attempt to restart the process
+   */
+  private async attemptRestart(): Promise<void> {
+    if (this.isClosing) {
+      return;
+    }
+
+    try {
+      await this.createTransport();
+
+      // Success!
+      const attemptsTaken = this.restartAttempt;
+      this.restartAttempt = 0;
+      this.nextRetryMs = 0;
+      this.isRestarting = false;
+
+      this.setStatus("connected");
+      this.emitLifecycleEvent({
+        event: "restarted",
+        timestamp: new Date(),
+        attempt: attemptsTaken,
+      });
+    } catch (err) {
+      // Clean up failed attempt
+      this.client = null;
+      this.transport = null;
+      this.errorMessage = err instanceof Error ? err.message : String(err);
+
+      // Schedule next attempt
+      this.scheduleRestart();
+    }
+  }
+
+  /**
+   * Calculate restart delay with exponential backoff
+   */
+  private calculateBackoff(attempt: number): number {
+    const delay =
+      this.restartConfig.baseDelayMs *
+      Math.pow(this.restartConfig.backoffMultiplier, attempt - 1);
+    return Math.min(delay, this.restartConfig.maxDelayMs);
+  }
+
+  /**
+   * Set up notification and request handlers for the client
    */
   private setupNotificationHandler(): void {
     if (!this.client) return;
@@ -631,7 +729,7 @@ export class MCPStdioClient implements IMCPClient {
     // Handle sampling/createMessage requests
     this.client.setRequestHandler(
       CreateMessageRequestSchema,
-      (request) => {
+      (request): Promise<CreateMessageResult> => {
         return new Promise((resolve, reject) => {
           if (this.onSamplingRequest) {
             this.onSamplingRequest({
@@ -652,7 +750,7 @@ export class MCPStdioClient implements IMCPClient {
     // Handle elicitation/create requests
     this.client.setRequestHandler(
       ElicitRequestSchema,
-      (request) => {
+      (request): Promise<ElicitResult> => {
         return new Promise((resolve, reject) => {
           if (this.onElicitationRequest) {
             this.onElicitationRequest({
@@ -671,290 +769,9 @@ export class MCPStdioClient implements IMCPClient {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Private Methods - Crash Handling & Restart
-  // ---------------------------------------------------------------------------
-
   /**
-   * Handle unexpected process crash
+   * Emit a notification to the callback
    */
-  private handleProcessCrash(): void {
-    if (this.isRestarting || this.isClosing) {
-      return;
-    }
-
-    const pid = this.transport?.pid;
-
-    // Stop health checks
-    this.stopHealthChecks();
-
-    // Emit crash event
-    this.emitLifecycleEvent("process_crashed", {
-      pid: pid ?? undefined,
-      lastError: this.lastError,
-    });
-
-    // Clean up
-    this.client = null;
-    this.transport = null;
-    this.startTime = null;
-
-    // Check if auto-restart is enabled
-    if (!this.restartConfig.enabled) {
-      this.setStatus("error", this.lastError ?? "Process crashed (auto-restart disabled)");
-      return;
-    }
-
-    // Check if we should reset attempt counter (stable for resetAfterMs)
-    if (this.lastRestartTime) {
-      const stableTime = Date.now() - this.lastRestartTime.getTime();
-      if (stableTime > this.restartConfig.resetAfterMs) {
-        this.restartAttempt = 0;
-      }
-    }
-
-    // Check if we've exceeded max attempts
-    if (this.restartAttempt >= this.restartConfig.maxAttempts) {
-      this.setStatus(
-        "error",
-        `Process crashed and max restart attempts (${String(this.restartConfig.maxAttempts)}) exceeded`
-      );
-      this.emitLifecycleEvent("restart_failed", {
-        attemptsTaken: this.restartAttempt,
-        lastError: this.lastError,
-      });
-      if (this.onRestartFailed) {
-        this.onRestartFailed(this.restartAttempt, this.lastError ?? "Unknown error");
-      }
-      return;
-    }
-
-    // Start restart process
-    this.isRestarting = true;
-    this.scheduleRestart();
-  }
-
-  /**
-   * Schedule a restart attempt
-   */
-  private scheduleRestart(): void {
-    if (this.isClosing) {
-      return;
-    }
-
-    this.restartAttempt++;
-    const delay = this.calculateRestartDelay();
-    this.nextRetryMs = delay;
-
-    // Update status
-    this.setStatus("restarting", this.lastError);
-
-    // Emit restarting event
-    this.emitLifecycleEvent("restarting", {
-      attempt: this.restartAttempt,
-      maxAttempts: this.restartConfig.maxAttempts,
-      nextRetryMs: delay,
-      lastError: this.lastError,
-    });
-
-    // Notify callback
-    if (this.onReconnecting) {
-      this.onReconnecting(this.restartAttempt, delay);
-    }
-
-    // Schedule restart
-    this.restartTimeoutHandle = setTimeout(() => {
-      void this.attemptRestart();
-    }, delay);
-  }
-
-  /**
-   * Attempt to restart the process
-   */
-  private async attemptRestart(): Promise<void> {
-    if (this.isClosing) {
-      return;
-    }
-
-    this.lastRestartTime = new Date();
-
-    try {
-      // Spawn new process
-      this.createTransport();
-
-      // Initialize MCP
-      await this.initializeMCP();
-
-      // Set up stderr capture after process is running
-      this.setupStderrCapture();
-
-      // Success!
-      const attemptsTaken = this.restartAttempt;
-      this.restartAttempt = 0;
-      this.nextRetryMs = 0;
-      this.isRestarting = false;
-      this.startTime = new Date();
-
-      // Reset health state
-      this.consecutiveHealthFailures = 0;
-      this.healthStatus = "healthy";
-
-      this.setStatus("connected");
-
-      // Emit restarted event
-      this.emitLifecycleEvent("restarted", {
-        attemptsTaken,
-        newPid: this.transport?.pid ?? undefined,
-      });
-
-      // Notify callback
-      if (this.onReconnected) {
-        this.onReconnected(attemptsTaken);
-      }
-
-      // Start health checks
-      this.startHealthChecks();
-    } catch (err) {
-      // Clean up failed attempt
-      this.client = null;
-      this.transport = null;
-      this.lastError = err instanceof Error ? err.message : String(err);
-      this.isRestarting = false;
-
-      // Check if we've exceeded max attempts
-      if (this.restartAttempt >= this.restartConfig.maxAttempts) {
-        this.setStatus(
-          "error",
-          `Process crashed and max restart attempts (${String(this.restartConfig.maxAttempts)}) exceeded`
-        );
-        this.emitLifecycleEvent("restart_failed", {
-          attemptsTaken: this.restartAttempt,
-          lastError: this.lastError,
-        });
-        if (this.onRestartFailed) {
-          this.onRestartFailed(this.restartAttempt, this.lastError);
-        }
-      } else {
-        // Schedule next attempt
-        this.isRestarting = true;
-        this.scheduleRestart();
-      }
-    }
-  }
-
-  /**
-   * Calculate restart delay with exponential backoff
-   */
-  private calculateRestartDelay(): number {
-    const exponentialDelay =
-      this.restartConfig.baseDelayMs *
-      Math.pow(this.restartConfig.backoffMultiplier, this.restartAttempt - 1);
-
-    const cappedDelay = Math.min(exponentialDelay, this.restartConfig.maxDelayMs);
-
-    // Add jitter (±10%)
-    const jitter = cappedDelay * 0.1 * (Math.random() * 2 - 1);
-
-    return Math.round(cappedDelay + jitter);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Private Methods - Health Checks
-  // ---------------------------------------------------------------------------
-
-  private startHealthChecks(): void {
-    this.stopHealthChecks();
-
-    const scheduleNextCheck = (): void => {
-      const jitter =
-        HEALTH_CHECK_INTERVAL_MS * HEALTH_CHECK_JITTER_FACTOR * (Math.random() * 2 - 1);
-      const interval = Math.round(HEALTH_CHECK_INTERVAL_MS + jitter);
-
-      this.healthCheckIntervalHandle = setTimeout(() => {
-        void this.performHealthCheck();
-        scheduleNextCheck();
-      }, interval);
-    };
-
-    scheduleNextCheck();
-  }
-
-  private stopHealthChecks(): void {
-    if (this.healthCheckIntervalHandle) {
-      clearTimeout(this.healthCheckIntervalHandle);
-      this.healthCheckIntervalHandle = null;
-    }
-  }
-
-  private async performHealthCheck(): Promise<void> {
-    if (!this.client || !this.isConnected()) {
-      return;
-    }
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
-        controller.abort();
-      }, HEALTH_CHECK_TIMEOUT_MS);
-
-      try {
-        await this.client.listTools();
-        clearTimeout(timeoutId);
-
-        if (this.consecutiveHealthFailures > 0) {
-          const wasDegraded = this.healthStatus === "degraded";
-          this.consecutiveHealthFailures = 0;
-          this.healthStatus = "healthy";
-
-          if (wasDegraded && this.onHealthRestored) {
-            this.onHealthRestored();
-          }
-        }
-      } catch (err) {
-        clearTimeout(timeoutId);
-        throw err;
-      }
-    } catch (err) {
-      this.consecutiveHealthFailures++;
-      const errorMessage = err instanceof Error ? err.message : String(err);
-
-      if (
-        this.consecutiveHealthFailures >= HEALTH_CHECK_DEGRADED_THRESHOLD &&
-        this.healthStatus !== "degraded"
-      ) {
-        this.healthStatus = "degraded";
-        if (this.onHealthDegraded) {
-          this.onHealthDegraded(this.consecutiveHealthFailures, errorMessage);
-        }
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Private Methods - Helpers
-  // ---------------------------------------------------------------------------
-
-  private setStatus(status: BackendServerStatus, error?: string): void {
-    this.status = status;
-
-    if (status === "error" && error !== undefined) {
-      this.errorMessage = error;
-    } else if (status !== "restarting") {
-      this.errorMessage = undefined;
-    }
-
-    if (this.onStatusChange !== undefined) {
-      this.onStatusChange(status, error);
-    }
-  }
-
-  private getConnectedClient(): Client {
-    if (!this.isConnected() || !this.client) {
-      throw new Error(`Client '${this.name}' is not connected`);
-    }
-    return this.client;
-  }
-
   private emitNotification(
     method: string,
     params?: JSONRPCNotification["params"]
@@ -969,32 +786,39 @@ export class MCPStdioClient implements IMCPClient {
     }
   }
 
-  private emitLifecycleEvent(
-    event: StdioLifecycleEvent,
-    data: Partial<StdioLifecycleEventData> = {}
-  ): void {
-    const eventData: StdioLifecycleEventData = {
-      server: this.name,
-      event,
-      timestamp: new Date(),
-      ...data,
-    };
-
-    // Emit via callback
+  /**
+   * Emit a lifecycle event
+   */
+  private emitLifecycleEvent(event: LifecycleEvent): void {
     if (this.onLifecycleEvent) {
-      this.onLifecycleEvent(eventData);
+      this.onLifecycleEvent(event);
+    }
+  }
+
+  /**
+   * Update the connection status and notify the callback
+   */
+  private setStatus(status: BackendServerStatus, error?: string): void {
+    this.status = status;
+
+    if (status === "error" && error !== undefined) {
+      this.errorMessage = error;
+    } else {
+      this.errorMessage = undefined;
     }
 
-    // Also emit as a log entry for visibility
-    if (this.onLog) {
-      this.onLog({
-        server: this.name,
-        timestamp: new Date(),
-        level: event === "restart_failed" || event === "process_crashed" ? "error" : "info",
-        logger: "process:lifecycle",
-        data: eventData,
-        source: "protocol", // Lifecycle events are protocol-level
-      });
+    if (this.onStatusChange !== undefined) {
+      this.onStatusChange(status, error);
     }
+  }
+
+  /**
+   * Get the connected client, throwing if not connected
+   */
+  private getConnectedClient(): Client {
+    if (!this.isConnected() || !this.client) {
+      throw new Error(`Client '${this.name}' is not connected`);
+    }
+    return this.client;
   }
 }

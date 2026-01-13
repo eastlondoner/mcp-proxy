@@ -86,16 +86,9 @@ export interface ReconciliationResult {
 }
 
 /**
- * Server transport type
- */
-export type ServerTransportType = "http" | "stdio";
-
-/**
- * Configuration for an HTTP backend MCP server
+ * Configuration for a backend HTTP MCP server
  */
 export interface HttpServerConfig {
-  /** Transport type */
-  type: "http";
   /** Unique name to identify this server */
   name: string;
   /** HTTP URL of the MCP server endpoint */
@@ -103,57 +96,58 @@ export interface HttpServerConfig {
 }
 
 /**
- * Configuration for restart behavior of stdio servers
+ * Restart configuration for stdio servers
  */
 export interface StdioRestartConfig {
-  /** Enable auto-restart on crash (default: true) */
-  enabled: boolean;
+  /** Whether to automatically restart on crash (default: true) */
+  enabled?: boolean;
   /** Maximum restart attempts before giving up (default: 5) */
-  maxAttempts: number;
-  /** Initial delay before first restart in ms (default: 1000) */
-  baseDelayMs: number;
-  /** Maximum delay cap in ms (default: 60000) */
-  maxDelayMs: number;
-  /** Exponential backoff multiplier (default: 2) */
-  backoffMultiplier: number;
-  /** Reset attempt counter after stable period in ms (default: 300000) */
-  resetAfterMs: number;
+  maxAttempts?: number;
+  /** Base delay in ms before first restart (default: 1000) */
+  baseDelayMs?: number;
+  /** Maximum delay in ms between restarts (default: 60000) */
+  maxDelayMs?: number;
+  /** Backoff multiplier (default: 2) */
+  backoffMultiplier?: number;
 }
 
 /**
- * Configuration for a stdio backend MCP server
+ * Configuration for a backend stdio MCP server
  */
 export interface StdioServerConfig {
-  /** Transport type */
-  type: "stdio";
   /** Unique name to identify this server */
   name: string;
-  /** Command to execute */
+  /** Transport type - must be "stdio" */
+  type: "stdio";
+  /** Command to spawn */
   command: string;
-  /** Arguments to pass to the command */
+  /** Command arguments */
   args?: string[];
-  /** Environment variables for the process */
+  /** Environment variables */
   env?: Record<string, string>;
-  /** Working directory for the process */
+  /** Working directory */
   cwd?: string;
   /** Restart configuration */
-  restartConfig?: Partial<StdioRestartConfig>;
+  restartConfig?: StdioRestartConfig;
 }
 
 /**
- * Configuration for a backend MCP server (union type)
+ * Configuration for a backend MCP server (HTTP or stdio)
  */
 export type BackendServerConfig = HttpServerConfig | StdioServerConfig;
 
 /**
- * Legacy configuration for HTTP-only backend servers
- * @deprecated Use BackendServerConfig with type: "http" instead
+ * Type guard for HTTP server config
  */
-export interface LegacyBackendServerConfig {
-  /** Unique name to identify this server */
-  name: string;
-  /** HTTP URL of the MCP server endpoint */
-  url: string;
+export function isHttpServerConfig(config: BackendServerConfig): config is HttpServerConfig {
+  return "url" in config && !("type" in config && config.type === "stdio");
+}
+
+/**
+ * Type guard for stdio server config
+ */
+export function isStdioServerConfig(config: BackendServerConfig): config is StdioServerConfig {
+  return "type" in config;
 }
 
 /**
@@ -170,8 +164,7 @@ export type BackendServerStatus =
   | "connecting"     // Initial connection in progress
   | "connected"      // Successfully connected
   | "disconnected"   // Cleanly disconnected (intentional, e.g., remove_server)
-  | "reconnecting"   // Lost connection, attempting to reconnect (HTTP servers)
-  | "restarting"     // Process crashed, attempting to restart (stdio servers)
+  | "reconnecting"   // Lost connection, attempting to reconnect
   | "error";         // Connection error (with message)
 
 /**
@@ -180,16 +173,8 @@ export type BackendServerStatus =
 export interface BackendServerInfo {
   /** Server name */
   name: string;
-  /** Server transport type */
-  transportType: ServerTransportType;
-  /** Server URL (HTTP servers only) */
-  url?: string;
-  /** Command used to start server (stdio servers only) */
-  command?: string;
-  /** Arguments passed to command (stdio servers only) */
-  args?: string[];
-  /** Process ID (stdio servers only, when running) */
-  pid?: number;
+  /** Server URL */
+  url: string;
   /** Current connection status */
   status: BackendServerStatus;
   /** Error message if status is 'error' */
@@ -203,57 +188,6 @@ export interface BackendServerInfo {
     /** Whether the server supports resource subscriptions */
     resourceSubscriptions?: boolean;
   };
-}
-
-// =============================================================================
-// Stdio Server Lifecycle Types
-// =============================================================================
-
-/**
- * Lifecycle event types for stdio servers
- */
-export type StdioLifecycleEvent =
-  | "process_started"   // Initial process spawn successful
-  | "process_crashed"   // Process exited unexpectedly
-  | "restarting"        // Starting restart attempt
-  | "restarted"         // Successfully restarted
-  | "restart_failed"    // All restart attempts exhausted
-  | "process_stopped";  // Intentional shutdown
-
-/**
- * Data for stdio lifecycle events
- */
-export interface StdioLifecycleEventData {
-  /** Server name */
-  server: string;
-  /** Event type */
-  event: StdioLifecycleEvent;
-  /** Timestamp of the event */
-  timestamp: Date;
-  /** Process ID (for started/stopped events) */
-  pid?: number;
-  /** Command used to start the process (for started events) */
-  command?: string;
-  /** Arguments passed to the command (for started events) */
-  args?: string[];
-  /** Exit code (for crashed events) */
-  exitCode?: number;
-  /** Signal that killed the process (for crashed events) */
-  signal?: string;
-  /** Current restart attempt number (for restarting events) */
-  attempt?: number;
-  /** Maximum restart attempts (for restarting events) */
-  maxAttempts?: number;
-  /** Delay until next retry in ms (for restarting events) */
-  nextRetryMs?: number;
-  /** Total attempts taken (for restarted events) */
-  attemptsTaken?: number;
-  /** New process ID after restart (for restarted events) */
-  newPid?: number;
-  /** Last error message */
-  lastError?: string;
-  /** Process uptime in ms (for stopped events) */
-  uptimeMs?: number;
 }
 
 /**
@@ -323,11 +257,6 @@ export interface ToolExecutionResult {
 // =============================================================================
 
 /**
- * Source of a log entry - indicates where the log originated
- */
-export type LogSource = "protocol" | "stderr" | "stdout";
-
-/**
  * A buffered log message from a backend server
  */
 export interface BufferedLog {
@@ -341,8 +270,6 @@ export interface BufferedLog {
   logger?: string;
   /** Log data (can be any JSON-serializable type) */
   data: unknown;
-  /** Source of the log entry (protocol=MCP notifications/message, stderr/stdout=process output) */
-  source: LogSource;
 }
 
 // =============================================================================

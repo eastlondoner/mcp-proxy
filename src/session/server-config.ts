@@ -1,7 +1,7 @@
 /**
  * Server Config Registry
  *
- * Shared registry of server configurations (name → URL mapping).
+ * Shared registry of server configurations (name → URL/command mapping).
  * All sessions can use these configs to establish backend connections.
  *
  * This is separate from actual connections - connections are per-session,
@@ -9,19 +9,65 @@
  */
 
 import type { StructuredLogger } from "../logging.js";
+import type { StdioRestartConfig } from "../types.js";
 
 /**
- * Configuration for a backend MCP server
+ * Configuration for a backend HTTP MCP server
  */
-export interface ServerConfig {
+export interface HttpServerConfig {
   /** Unique name to identify this server */
   name: string;
+  /** Transport type */
+  type: "http";
   /** HTTP URL of the MCP server endpoint */
   url: string;
   /** When this config was added */
   addedAt: Date;
   /** Session ID that added this config (for logging) */
   addedBy?: string;
+}
+
+/**
+ * Configuration for a backend stdio MCP server
+ */
+export interface StdioServerConfigInternal {
+  /** Unique name to identify this server */
+  name: string;
+  /** Transport type */
+  type: "stdio";
+  /** Command to spawn */
+  command: string;
+  /** Command arguments */
+  args?: string[];
+  /** Environment variables */
+  env?: Record<string, string>;
+  /** Working directory */
+  cwd?: string;
+  /** Restart configuration */
+  restartConfig?: StdioRestartConfig;
+  /** When this config was added */
+  addedAt: Date;
+  /** Session ID that added this config (for logging) */
+  addedBy?: string;
+}
+
+/**
+ * Configuration for a backend MCP server (HTTP or stdio)
+ */
+export type ServerConfig = HttpServerConfig | StdioServerConfigInternal;
+
+/**
+ * Type guard for HTTP server config
+ */
+export function isHttpConfig(config: ServerConfig): config is HttpServerConfig {
+  return config.type === "http";
+}
+
+/**
+ * Type guard for stdio server config
+ */
+export function isStdioConfig(config: ServerConfig): config is StdioServerConfigInternal {
+  return config.type === "stdio";
 }
 
 /**
@@ -35,7 +81,7 @@ export interface ServerConfigRegistryOptions {
 /**
  * Shared registry of server configurations.
  *
- * This is a simple in-memory store of server name → URL mappings.
+ * This is a simple in-memory store of server configurations.
  * Sessions use this to know which servers to connect to.
  */
 export class ServerConfigRegistry {
@@ -47,7 +93,7 @@ export class ServerConfigRegistry {
   }
 
   /**
-   * Add a server configuration.
+   * Add an HTTP server configuration.
    *
    * @param name - Unique name for this server
    * @param url - HTTP URL of the MCP server endpoint
@@ -58,6 +104,7 @@ export class ServerConfigRegistry {
     const existing = this.configs.has(name);
     this.configs.set(name, {
       name,
+      type: "http",
       url,
       addedAt: new Date(),
       addedBy,
@@ -65,7 +112,53 @@ export class ServerConfigRegistry {
 
     this.logger?.info(existing ? "server_config_updated" : "server_config_added", {
       server: name,
+      type: "http",
       url,
+      addedBy,
+    });
+
+    return !existing;
+  }
+
+  /**
+   * Add a stdio server configuration.
+   *
+   * @param name - Unique name for this server
+   * @param command - Command to spawn
+   * @param args - Command arguments
+   * @param options - Additional options (env, cwd, restartConfig)
+   * @param addedBy - Optional session ID that added this config
+   * @returns true if new config, false if updated existing
+   */
+  public addStdioConfig(
+    name: string,
+    command: string,
+    args?: string[],
+    options?: {
+      env?: Record<string, string>;
+      cwd?: string;
+      restartConfig?: StdioRestartConfig;
+    },
+    addedBy?: string
+  ): boolean {
+    const existing = this.configs.has(name);
+    this.configs.set(name, {
+      name,
+      type: "stdio",
+      command,
+      args,
+      env: options?.env,
+      cwd: options?.cwd,
+      restartConfig: options?.restartConfig,
+      addedAt: new Date(),
+      addedBy,
+    });
+
+    this.logger?.info(existing ? "server_config_updated" : "server_config_added", {
+      server: name,
+      type: "stdio",
+      command,
+      args,
       addedBy,
     });
 

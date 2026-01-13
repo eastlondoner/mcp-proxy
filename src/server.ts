@@ -24,6 +24,7 @@ import { SessionManager } from "./session/session-manager.js";
 import type { SessionState } from "./session/session-state.js";
 import { SSEEventStore } from "./session/sse-event-store.js";
 import type { ProxyConfig } from "./types.js";
+import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
 import { createConsoleLogger } from "./logging.js";
 import { RequestTracker } from "./request-tracker.js";
 import { generateWaterfallHTML, generateWaterfallJSON } from "./waterfall-ui.js";
@@ -249,23 +250,67 @@ function registerTools(
   server.registerTool(
     "add_server",
     {
-      description: "Connect to a backend MCP server. The server will be added to the shared configuration and this session will connect to it.",
+      description: "Connect to a backend MCP server. Supports two transport types:\n\n" +
+        "**HTTP Transport**: Provide a `url` to connect to a remote HTTP/SSE MCP server.\n" +
+        "Example: add_server(name: \"myserver\", url: \"http://localhost:3001/mcp\")\n\n" +
+        "**Stdio Transport**: Provide `command` (and optionally `args`) to spawn a local MCP server process.\n" +
+        "Example: add_server(name: \"myserver\", command: \"npx\", args: [\"some-mcp-server\"])\n\n" +
+        "Stdio servers support automatic crash recovery with exponential backoff restart.",
       inputSchema: {
         name: z.string().describe("Unique name for this server"),
-        url: z.string().url().describe("HTTP URL of the MCP server endpoint"),
+        url: z.string().url().optional().describe("HTTP URL of the MCP server endpoint (for HTTP transport)"),
+        command: z.string().optional().describe("Command to spawn (for stdio transport, e.g., 'node', 'npx', 'python')"),
+        args: z.array(z.string()).optional().describe("Arguments for the command (for stdio transport)"),
+        env: z.record(z.string()).optional().describe("Environment variables for the spawned process (stdio only)"),
+        cwd: z.string().optional().describe("Working directory for the spawned process (stdio only)"),
+        restartConfig: z.object({
+          enabled: z.boolean().optional().describe("Enable automatic restart on crash (default: true)"),
+          maxAttempts: z.number().optional().describe("Maximum restart attempts (default: 5)"),
+          baseDelayMs: z.number().optional().describe("Base delay before restart in ms (default: 1000)"),
+          maxDelayMs: z.number().optional().describe("Maximum delay between restarts in ms (default: 60000)"),
+          backoffMultiplier: z.number().optional().describe("Backoff multiplier (default: 2)"),
+        }).optional().describe("Restart configuration for stdio servers"),
       },
     },
-    async ({ name, url }, extra): Promise<ToolResponse> => {
+    async ({ name, url, command, args, env, cwd, restartConfig }, extra): Promise<ToolResponse> => {
       const session = getSessionForTool(sessionManager, extra, sessions);
       if (!session) {
         return toolError("Session not found");
       }
 
+      // Validate that either url OR command is provided, but not both
+      if (url && command) {
+        return toolError("Provide either 'url' (for HTTP) or 'command' (for stdio), not both");
+      }
+      if (!url && !command) {
+        return toolError("Must provide either 'url' (for HTTP transport) or 'command' (for stdio transport)");
+      }
+
       try {
-        const connection = await sessionManager.addServer(session.sessionId, name, url);
+        let connection;
+        let serverDescription: string;
+
+        if (url) {
+          // HTTP transport
+          connection = await sessionManager.addServer(session.sessionId, name, url);
+          serverDescription = url;
+        } else if (command) {
+          // Stdio transport
+          connection = await sessionManager.addStdioServer(
+            session.sessionId,
+            name,
+            command,
+            args,
+            { env, cwd, restartConfig }
+          );
+          serverDescription = `stdio://${command}${args?.length ? ` ${args.join(" ")}` : ""}`;
+        } else {
+          return toolError("Internal error: no transport specified");
+        }
+
         const capabilities = connection.client.getInfo().capabilities;
         return toolSuccess(
-          `Connected to server '${name}' at ${url}\n` +
+          `Connected to server '${name}' at ${serverDescription}\n` +
           `Capabilities: ${JSON.stringify(capabilities)}`,
           session
         );
@@ -860,53 +905,22 @@ function registerTools(
   server.registerTool(
     "get_logs",
     {
-      description:
-        "Get and clear buffered log messages from backend servers. " +
-        "Returns logs from all sources (protocol logs, stderr, stdout) with source indication. " +
-        "Use exclude_sources to filter out specific sources.",
-      inputSchema: {
-        server: z.string().optional().describe("Filter logs by server name"),
-        exclude_sources: z
-          .array(z.enum(["protocol", "stderr", "stdout"]))
-          .optional()
-          .describe("Sources to exclude (e.g., ['stderr', 'stdout'] for protocol logs only)"),
-        limit: z.number().optional().default(100).describe("Maximum number of logs to return"),
-      },
+      description: "Get and clear buffered log messages from backend servers for this session",
+      inputSchema: {},
     },
-    (args, extra): ToolResponse => {
-      const { server: serverFilter, exclude_sources, limit = 100 } = args as {
-        server?: string;
-        exclude_sources?: ("protocol" | "stderr" | "stdout")[];
-        limit?: number;
-      };
-
+    (_args, extra): ToolResponse => {
       const session = getSessionForTool(sessionManager, extra, sessions);
       if (!session) {
         return toolError("Session not found");
       }
 
-      let logs = session.bufferManager.getAndClearLogs();
-
-      // Filter by server if specified
-      if (serverFilter) {
-        logs = logs.filter((l) => l.server === serverFilter);
-      }
-
-      // Filter out excluded sources
-      if (exclude_sources && exclude_sources.length > 0) {
-        logs = logs.filter((l) => !exclude_sources.includes(l.source));
-      }
-
-      // Apply limit
-      logs = logs.slice(-limit);
-
+      const logs = session.bufferManager.getAndClearLogs();
       if (logs.length === 0) {
         return toolSuccess("No log messages", session);
       }
 
       const formatted = logs.map((l) => ({
         server: l.server,
-        source: l.source,
         level: l.level,
         logger: l.logger,
         timestamp: l.timestamp.toISOString(),
@@ -1482,15 +1496,17 @@ function main(): void {
       });
 
       for (const server of config.servers) {
-        // Handle both new union type and legacy HTTP-only configs
-        const serverUrl = "url" in server ? server.url : undefined;
-        if (serverUrl) {
-          logger.info("Adding server config", { name: server.name, url: serverUrl });
-          sessionManager.getServerConfigs().addConfig(server.name, serverUrl);
-        } else {
-          logger.warn("Skipping non-HTTP server config (stdio not yet supported in config file)", {
-            name: server.name,
-          });
+        if (isHttpServerConfig(server)) {
+          logger.info("Adding HTTP server config", { name: server.name, url: server.url });
+          sessionManager.getServerConfigs().addConfig(server.name, server.url);
+        } else if (isStdioServerConfig(server)) {
+          logger.info("Adding stdio server config", { name: server.name, command: server.command });
+          sessionManager.getServerConfigs().addStdioConfig(
+            server.name,
+            server.command,
+            server.args,
+            { env: server.env, cwd: server.cwd, restartConfig: server.restartConfig }
+          );
         }
       }
     } catch (err) {

@@ -10,7 +10,7 @@
  * - Buffer manager (notifications/logs)
  */
 
-import type { MCPHttpClient } from "../client.js";
+import type { IMCPClient } from "../client-interface.js";
 import type { StructuredLogger } from "../logging.js";
 import {
   EventSystem,
@@ -52,14 +52,14 @@ export interface SessionStateConfig {
 /**
  * Status of a backend server connection within this session
  */
-export type BackendConnectionStatus = "connecting" | "connected" | "disconnected" | "reconnecting" | "restarting" | "error";
+export type BackendConnectionStatus = "connecting" | "connected" | "disconnected" | "reconnecting" | "error";
 
 /**
  * A backend MCP server connection owned by this session
  */
 export interface BackendConnection {
   /** The MCP client for this connection */
-  client: MCPHttpClient;
+  client: IMCPClient;
   /** Current connection status */
   status: BackendConnectionStatus;
   /** When the connection was established */
@@ -202,7 +202,7 @@ export class SessionState {
   /**
    * Add a backend connection.
    */
-  public addConnection(serverName: string, client: MCPHttpClient): void {
+  public addConnection(serverName: string, client: IMCPClient): void {
     this.backendConnections.set(serverName, {
       client,
       status: "connecting",

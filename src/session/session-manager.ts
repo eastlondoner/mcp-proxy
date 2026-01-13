@@ -15,6 +15,8 @@ import {
   ServerConfigRegistry,
   type ServerConfig,
   type ServerConfigRegistryOptions,
+  isHttpConfig,
+  isStdioConfig,
 } from "./server-config.js";
 import {
   SessionState,
@@ -22,7 +24,9 @@ import {
   type BackendConnection,
 } from "./session-state.js";
 import { MCPHttpClient } from "../client.js";
-import type { ServerInfo } from "../types.js";
+import { MCPStdioClient, type LogSource } from "../stdio-client.js";
+import type { IMCPClient } from "../client-interface.js";
+import type { ServerInfo, StdioRestartConfig } from "../types.js";
 
 /**
  * Configuration for SessionManager
@@ -137,7 +141,7 @@ export class SessionManager {
   // ==================== Server Configuration (Global) ====================
 
   /**
-   * Add a server configuration and connect the calling session.
+   * Add an HTTP server configuration and connect the calling session.
    * The server config is shared globally; other sessions can connect later.
    *
    * @returns Connection info including capabilities
@@ -169,6 +173,56 @@ export class SessionManager {
           otherSession.eventSystem.addEvent("server_added", name, {
             name,
             url,
+            addedBy: sessionId,
+          });
+        }
+      }
+    }
+
+    return connection;
+  }
+
+  /**
+   * Add a stdio server configuration and connect the calling session.
+   * The server config is shared globally; other sessions can connect later.
+   *
+   * @returns Connection info including capabilities
+   */
+  public async addStdioServer(
+    sessionId: string,
+    name: string,
+    command: string,
+    args?: string[],
+    options?: {
+      env?: Record<string, string>;
+      cwd?: string;
+      restartConfig?: StdioRestartConfig;
+    }
+  ): Promise<BackendConnection> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session '${sessionId}' not found`);
+    }
+
+    // 1. Add to global config registry
+    const isNew = this.serverConfigs.addStdioConfig(name, command, args, options, sessionId);
+
+    // 2. Connect THIS session to the server
+    const serverConfig = this.serverConfigs.getConfig(name);
+    if (!serverConfig) {
+      throw new Error(`Failed to add server config for '${name}'`);
+    }
+    const connection = await this.connectSessionToServer(session, serverConfig);
+
+    // 3. Broadcast server_added event to all OTHER sessions
+    if (isNew) {
+      for (const [otherId, otherSession] of this.sessions) {
+        if (otherId !== sessionId) {
+          otherSession.eventSystem.addEvent("server_added", name, {
+            name,
+            type: "stdio",
+            command,
+            args,
             addedBy: sessionId,
           });
         }
@@ -221,9 +275,20 @@ export class SessionManager {
 
     return configs.map((serverConfig) => {
       const connection = session?.getConnection(serverConfig.name);
+
+      // Get URL for display
+      let url: string;
+      if (isHttpConfig(serverConfig)) {
+        url = serverConfig.url;
+      } else if (isStdioConfig(serverConfig)) {
+        url = `stdio://${serverConfig.command}`;
+      } else {
+        url = "unknown";
+      }
+
       const info: ServerInfo = {
         name: serverConfig.name,
-        url: serverConfig.url,
+        url,
         connected: connection?.status === "connected",
         status: connection?.status ?? "not_connected",
         connectedAt: connection?.connectedAt,
@@ -306,7 +371,7 @@ export class SessionManager {
   public async getOrCreateConnection(
     sessionId: string,
     serverName: string
-  ): Promise<MCPHttpClient> {
+  ): Promise<IMCPClient> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session '${sessionId}' not found`);
@@ -336,7 +401,7 @@ export class SessionManager {
   public getConnectedClient(
     sessionId: string,
     serverName: string
-  ): MCPHttpClient | undefined {
+  ): IMCPClient | undefined {
     const session = this.sessions.get(sessionId);
     if (!session) return undefined;
 
@@ -363,102 +428,18 @@ export class SessionManager {
       throw new Error(`Already connecting to '${serverConfig.name}'`);
     }
 
-    // Create MCPHttpClient with session-specific callbacks
-    const client = new MCPHttpClient({
-      name: serverConfig.name,
-      url: serverConfig.url,
-      onStatusChange: (status, error): void => {
-        session.setConnectionStatus(serverConfig.name, status, error);
-        // Note: "disconnected" is only for intentional disconnect (remove_server)
-        // Unexpected disconnects go through "reconnecting" state via onReconnecting callback
-      },
-      onNotification: (notification): void => {
-        session.bufferManager.addNotification(notification);
-      },
-      onLog: (log): void => {
-        session.bufferManager.addLog(log);
-      },
-      onSamplingRequest: (request): void => {
-        // The client.ts creates requests with 'id', but our pending-requests
-        // uses 'requestId'. We add to our manager which creates its own ID.
-        session.pendingRequests.addSamplingRequest(
-          request.server,
-          request.params,
-          request.resolve,
-          request.reject
-        );
-      },
-      onElicitationRequest: (request): void => {
-        session.pendingRequests.addElicitationRequest(
-          request.server,
-          request.params,
-          request.resolve,
-          request.reject
-        );
-      },
-      // Reconnection callbacks
-      onReconnecting: (attempt, nextRetryMs): void => {
-        // On first reconnect attempt, fail pending work since backend state is lost
-        if (attempt === 1) {
-          this.handleBackendDisconnect(session, serverConfig.name);
-        }
+    // Create appropriate client type based on config
+    let client: IMCPClient;
 
-        // Emit reconnecting event
-        session.eventSystem.addEvent("server_reconnecting", serverConfig.name, {
-          name: serverConfig.name,
-          attempt,
-          nextRetryMs,
-        });
-
-        this.logger?.debug("session_server_reconnecting", {
-          sessionId: session.sessionId,
-          server: serverConfig.name,
-          attempt,
-          nextRetryMs,
-        });
-      },
-      onReconnected: (attemptsTaken): void => {
-        // Update connection status
-        session.setConnectionStatus(serverConfig.name, "connected");
-
-        // Emit reconnected event
-        session.eventSystem.addEvent("server_reconnected", serverConfig.name, {
-          name: serverConfig.name,
-          attemptsTaken,
-        });
-
-        this.logger?.info("session_server_reconnected", {
-          sessionId: session.sessionId,
-          server: serverConfig.name,
-          attemptsTaken,
-        });
-      },
-      // Health check callbacks
-      onHealthDegraded: (failures, lastError): void => {
-        session.eventSystem.addEvent("server_health_degraded", serverConfig.name, {
-          name: serverConfig.name,
-          consecutiveFailures: failures,
-          lastError,
-        });
-
-        this.logger?.warn("session_server_health_degraded", {
-          sessionId: session.sessionId,
-          server: serverConfig.name,
-          consecutiveFailures: failures,
-          lastError,
-        });
-      },
-      onHealthRestored: (): void => {
-        session.eventSystem.addEvent("server_health_restored", serverConfig.name, {
-          name: serverConfig.name,
-        });
-
-        this.logger?.info("session_server_health_restored", {
-          sessionId: session.sessionId,
-          server: serverConfig.name,
-        });
-      },
-    });
+    if (isHttpConfig(serverConfig)) {
+      client = this.createHttpClient(session, serverConfig);
+    } else if (isStdioConfig(serverConfig)) {
+      client = this.createStdioClient(session, serverConfig);
+    } else {
+      // This should be unreachable if ServerConfig is properly typed
+      const _exhaustiveCheck: never = serverConfig;
+      throw new Error(`Unknown server config type for '${(_exhaustiveCheck as ServerConfig).name}'`);
+    }
 
     // Add connection record before connecting
     session.addConnection(serverConfig.name, client);
@@ -498,6 +479,218 @@ export class SessionManager {
 
       throw err;
     }
+  }
+
+  /**
+   * Create an HTTP client with session-specific callbacks
+   */
+  private createHttpClient(
+    session: SessionState,
+    serverConfig: { name: string; url: string }
+  ): MCPHttpClient {
+    return new MCPHttpClient({
+      name: serverConfig.name,
+      url: serverConfig.url,
+      onStatusChange: (status, error): void => {
+        session.setConnectionStatus(serverConfig.name, status, error);
+      },
+      onNotification: (notification): void => {
+        session.bufferManager.addNotification(notification);
+      },
+      onLog: (log): void => {
+        session.bufferManager.addLog(log);
+      },
+      onSamplingRequest: (request): void => {
+        session.pendingRequests.addSamplingRequest(
+          request.server,
+          request.params,
+          request.resolve,
+          request.reject
+        );
+      },
+      onElicitationRequest: (request): void => {
+        session.pendingRequests.addElicitationRequest(
+          request.server,
+          request.params,
+          request.resolve,
+          request.reject
+        );
+      },
+      onReconnecting: (attempt, nextRetryMs): void => {
+        if (attempt === 1) {
+          this.handleBackendDisconnect(session, serverConfig.name);
+        }
+        session.eventSystem.addEvent("server_reconnecting", serverConfig.name, {
+          name: serverConfig.name,
+          attempt,
+          nextRetryMs,
+        });
+        this.logger?.debug("session_server_reconnecting", {
+          sessionId: session.sessionId,
+          server: serverConfig.name,
+          attempt,
+          nextRetryMs,
+        });
+      },
+      onReconnected: (attemptsTaken): void => {
+        session.setConnectionStatus(serverConfig.name, "connected");
+        session.eventSystem.addEvent("server_reconnected", serverConfig.name, {
+          name: serverConfig.name,
+          attemptsTaken,
+        });
+        this.logger?.info("session_server_reconnected", {
+          sessionId: session.sessionId,
+          server: serverConfig.name,
+          attemptsTaken,
+        });
+      },
+      onHealthDegraded: (failures, lastError): void => {
+        session.eventSystem.addEvent("server_health_degraded", serverConfig.name, {
+          name: serverConfig.name,
+          consecutiveFailures: failures,
+          lastError,
+        });
+        this.logger?.warn("session_server_health_degraded", {
+          sessionId: session.sessionId,
+          server: serverConfig.name,
+          consecutiveFailures: failures,
+          lastError,
+        });
+      },
+      onHealthRestored: (): void => {
+        session.eventSystem.addEvent("server_health_restored", serverConfig.name, {
+          name: serverConfig.name,
+        });
+        this.logger?.info("session_server_health_restored", {
+          sessionId: session.sessionId,
+          server: serverConfig.name,
+        });
+      },
+    });
+  }
+
+  /**
+   * Create a stdio client with session-specific callbacks
+   */
+  private createStdioClient(
+    session: SessionState,
+    serverConfig: {
+      name: string;
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      cwd?: string;
+      restartConfig?: StdioRestartConfig;
+    }
+  ): MCPStdioClient {
+    return new MCPStdioClient({
+      name: serverConfig.name,
+      command: serverConfig.command,
+      args: serverConfig.args,
+      env: serverConfig.env,
+      cwd: serverConfig.cwd,
+      restartConfig: serverConfig.restartConfig,
+      onStatusChange: (status, error): void => {
+        session.setConnectionStatus(serverConfig.name, status, error);
+      },
+      onNotification: (notification): void => {
+        session.bufferManager.addNotification(notification);
+      },
+      onLog: (log: { server: string; timestamp: Date; level: string; logger?: string; data: unknown; source: LogSource }): void => {
+        // Pass the log with source information
+        session.bufferManager.addLog({
+          server: log.server,
+          timestamp: log.timestamp,
+          level: log.level as "debug" | "info" | "notice" | "warning" | "error" | "critical" | "alert" | "emergency",
+          logger: log.logger,
+          data: log.data,
+        });
+      },
+      onSamplingRequest: (request): void => {
+        session.pendingRequests.addSamplingRequest(
+          request.server,
+          request.params,
+          request.resolve,
+          request.reject
+        );
+      },
+      onElicitationRequest: (request): void => {
+        session.pendingRequests.addElicitationRequest(
+          request.server,
+          request.params,
+          request.resolve,
+          request.reject
+        );
+      },
+      onLifecycleEvent: (event): void => {
+        // Map lifecycle events to session events
+        switch (event.event) {
+          case "process_started":
+            this.logger?.info("session_stdio_process_started", {
+              sessionId: session.sessionId,
+              server: serverConfig.name,
+            });
+            break;
+          case "process_crashed":
+            this.handleBackendDisconnect(session, serverConfig.name);
+            session.eventSystem.addEvent("server_process_crashed", serverConfig.name, {
+              name: serverConfig.name,
+              exitCode: event.exitCode,
+              signal: event.signal,
+            });
+            this.logger?.warn("session_stdio_process_crashed", {
+              sessionId: session.sessionId,
+              server: serverConfig.name,
+              exitCode: event.exitCode,
+              signal: event.signal,
+            });
+            break;
+          case "restarting":
+            session.eventSystem.addEvent("server_reconnecting", serverConfig.name, {
+              name: serverConfig.name,
+              attempt: event.attempt,
+              nextRetryMs: event.nextRetryMs,
+            });
+            this.logger?.debug("session_stdio_restarting", {
+              sessionId: session.sessionId,
+              server: serverConfig.name,
+              attempt: event.attempt,
+              nextRetryMs: event.nextRetryMs,
+            });
+            break;
+          case "restarted":
+            session.setConnectionStatus(serverConfig.name, "connected");
+            session.eventSystem.addEvent("server_reconnected", serverConfig.name, {
+              name: serverConfig.name,
+              attemptsTaken: event.attempt,
+            });
+            this.logger?.info("session_stdio_restarted", {
+              sessionId: session.sessionId,
+              server: serverConfig.name,
+              attemptsTaken: event.attempt,
+            });
+            break;
+          case "restart_failed":
+            session.setConnectionStatus(serverConfig.name, "error", event.error);
+            session.eventSystem.addEvent("server_restart_failed", serverConfig.name, {
+              name: serverConfig.name,
+              error: event.error,
+            });
+            this.logger?.error("session_stdio_restart_failed", {
+              sessionId: session.sessionId,
+              server: serverConfig.name,
+              error: event.error,
+            });
+            break;
+          case "process_stopped":
+            this.logger?.info("session_stdio_process_stopped", {
+              sessionId: session.sessionId,
+              server: serverConfig.name,
+            });
+            break;
+        }
+      },
+    });
   }
 
   /**

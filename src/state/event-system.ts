@@ -37,6 +37,9 @@ export type ProxyEventType =
   // Health check events
   | "server_health_degraded"
   | "server_health_restored"
+  // Stdio process lifecycle events
+  | "server_process_crashed"
+  | "server_restart_failed"
   // Timer events
   | "timer_expired";
 
