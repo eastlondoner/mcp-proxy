@@ -844,11 +844,11 @@ export class MCPHttpClient implements IMCPClient {
         clearTimeout(timeoutId);
 
         if (this.consecutiveHealthFailures > 0) {
-          const wasDegraaded = this.healthStatus === "degraded";
+          const wasDegraded = this.healthStatus === "degraded";
           this.consecutiveHealthFailures = 0;
           this.healthStatus = "healthy";
 
-          if (wasDegraaded && this.onHealthRestored) {
+          if (wasDegraded && this.onHealthRestored) {
             this.onHealthRestored();
           }
         }

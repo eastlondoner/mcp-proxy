@@ -82,7 +82,7 @@ async function main(): Promise<void> {
       args: ["run", "test/fixtures/echo-server.ts"],
       restartConfig: {
         maxAttempts: 3,
-        initialDelayMs: 500,
+        baseDelayMs: 500,
         maxDelayMs: 2000,
         backoffMultiplier: 2,
       },

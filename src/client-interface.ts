@@ -196,15 +196,29 @@ export interface MCPStdioClientOptionsExtension {
 }
 
 /**
- * Type guard to check if a client is an stdio client
+ * Interface marker for stdio clients
  */
-export function isStdioClient(client: IMCPClient): boolean {
+export interface IStdioClient extends IMCPClient {
+  getTransportType(): "stdio";
+}
+
+/**
+ * Interface marker for HTTP clients
+ */
+export interface IHttpClient extends IMCPClient {
+  getTransportType(): "http";
+}
+
+/**
+ * Type guard to check if a client is a stdio client
+ */
+export function isStdioClient(client: IMCPClient): client is IStdioClient {
   return client.getTransportType() === "stdio";
 }
 
 /**
  * Type guard to check if a client is an HTTP client
  */
-export function isHttpClient(client: IMCPClient): boolean {
+export function isHttpClient(client: IMCPClient): client is IHttpClient {
   return client.getTransportType() === "http";
 }

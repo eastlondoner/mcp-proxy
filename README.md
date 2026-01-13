@@ -102,7 +102,17 @@ emceepee exposes a **static set of tools** that never change. These tools provid
 | Tool | Description |
 |------|-------------|
 | `get_notifications` | Get buffered server notifications |
-| `get_logs` | Get buffered log messages |
+| `get_logs` | Get buffered log messages with source filtering |
+
+The `get_logs` tool supports filtering by log source:
+- `protocol`: MCP protocol messages and notifications
+- `stderr`: Process stderr output (for stdio servers)
+- `stdout`: Process stdout capture (for local HTTP servers)
+
+Example: Get only protocol logs by excluding stderr/stdout:
+```json
+{ "exclude_sources": ["stderr", "stdout"] }
+```
 
 ### Sampling (bidirectional LLM requests)
 | Tool | Description |
@@ -228,8 +238,25 @@ bun install              # Install dependencies
 bun run dev              # stdio server (development)
 bun run dev:http         # HTTP server (development)
 bun run check            # TypeScript + ESLint
+bun run test             # Run tests
 bun run build            # Production build
 ```
+
+### Testing
+
+The test suite includes integration tests for the stdio client:
+
+```bash
+bun run test             # Run all tests
+bun run test:stdio       # Run stdio client tests specifically
+```
+
+Tests cover:
+- Connection lifecycle (connect, disconnect)
+- Tool listing and invocation
+- Stderr capture with source indication
+- Crash handling and automatic restart with exponential backoff
+- Lifecycle events (process_started, crashed, restarting, restarted, stopped)
 
 ## License
 
