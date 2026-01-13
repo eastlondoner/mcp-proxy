@@ -860,22 +860,53 @@ function registerTools(
   server.registerTool(
     "get_logs",
     {
-      description: "Get and clear buffered log messages from backend servers for this session",
-      inputSchema: {},
+      description:
+        "Get and clear buffered log messages from backend servers. " +
+        "Returns logs from all sources (protocol logs, stderr, stdout) with source indication. " +
+        "Use exclude_sources to filter out specific sources.",
+      inputSchema: {
+        server: z.string().optional().describe("Filter logs by server name"),
+        exclude_sources: z
+          .array(z.enum(["protocol", "stderr", "stdout"]))
+          .optional()
+          .describe("Sources to exclude (e.g., ['stderr', 'stdout'] for protocol logs only)"),
+        limit: z.number().optional().default(100).describe("Maximum number of logs to return"),
+      },
     },
-    (_args, extra): ToolResponse => {
+    (args, extra): ToolResponse => {
+      const { server: serverFilter, exclude_sources, limit = 100 } = args as {
+        server?: string;
+        exclude_sources?: ("protocol" | "stderr" | "stdout")[];
+        limit?: number;
+      };
+
       const session = getSessionForTool(sessionManager, extra, sessions);
       if (!session) {
         return toolError("Session not found");
       }
 
-      const logs = session.bufferManager.getAndClearLogs();
+      let logs = session.bufferManager.getAndClearLogs();
+
+      // Filter by server if specified
+      if (serverFilter) {
+        logs = logs.filter((l) => l.server === serverFilter);
+      }
+
+      // Filter out excluded sources
+      if (exclude_sources && exclude_sources.length > 0) {
+        logs = logs.filter((l) => !exclude_sources.includes(l.source));
+      }
+
+      // Apply limit
+      logs = logs.slice(-limit);
+
       if (logs.length === 0) {
         return toolSuccess("No log messages", session);
       }
 
       const formatted = logs.map((l) => ({
         server: l.server,
+        source: l.source,
         level: l.level,
         logger: l.logger,
         timestamp: l.timestamp.toISOString(),
@@ -1451,8 +1482,16 @@ function main(): void {
       });
 
       for (const server of config.servers) {
-        logger.info("Adding server config", { name: server.name, url: server.url });
-        sessionManager.getServerConfigs().addConfig(server.name, server.url);
+        // Handle both new union type and legacy HTTP-only configs
+        const serverUrl = "url" in server ? server.url : undefined;
+        if (serverUrl) {
+          logger.info("Adding server config", { name: server.name, url: serverUrl });
+          sessionManager.getServerConfigs().addConfig(server.name, serverUrl);
+        } else {
+          logger.warn("Skipping non-HTTP server config (stdio not yet supported in config file)", {
+            name: server.name,
+          });
+        }
       }
     } catch (err) {
       logger.error("Failed to load config", {

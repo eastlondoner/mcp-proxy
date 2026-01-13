@@ -23,6 +23,11 @@ export interface BufferedNotification {
 }
 
 /**
+ * Source of a log entry
+ */
+export type LogSource = "protocol" | "stderr" | "stdout";
+
+/**
  * A buffered log message from a backend server
  */
 export interface BufferedLog {
@@ -31,6 +36,8 @@ export interface BufferedLog {
   level: LoggingLevel;
   logger?: string;
   data?: unknown;
+  /** Source of the log entry (protocol=MCP notifications/message, stderr/stdout=process output) */
+  source: LogSource;
 }
 
 /**
