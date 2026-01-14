@@ -179,6 +179,10 @@ export interface BackendServerInfo {
   status: BackendServerStatus;
   /** Error message if status is 'error' */
   error?: string;
+  /** Transport type */
+  transportType?: "http" | "stdio";
+  /** Process ID for stdio servers */
+  pid?: number;
   /** Server capabilities from initialization */
   capabilities?: {
     tools?: boolean;

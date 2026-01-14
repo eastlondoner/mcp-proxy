@@ -199,10 +199,17 @@ export class MCPStdioClient implements IStdioClient {
 
   public getInfo(): BackendServerInfo {
     const info: BackendServerInfo = {
+      transportType: "stdio",
       name: this.name,
       url: `stdio://${this.command}`,
       status: this.status,
     };
+
+    // Add PID if we have a running process
+    const proc = (this.transport as unknown as { _process?: { pid?: number } })._process;
+    if (proc?.pid !== undefined) {
+      info.pid = proc.pid;
+    }
 
     if (this.errorMessage !== undefined) {
       info.error = this.errorMessage;
