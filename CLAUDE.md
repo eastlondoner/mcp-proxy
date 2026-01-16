@@ -125,4 +125,14 @@ See [MCP_TESTING_GUIDE.md](./MCP_TESTING_GUIDE.md) for detailed instructions on:
 - Handling server restarts and reconnections
 - Daisy-chaining emceepee instances to test changes to emceepee itself
 
+## Publishing
+
+**Do NOT run `npm publish` manually.** npm publishing is handled automatically by GitHub CI when releases are created.
+
+To publish a new version:
+1. Bump the version in `package.json`
+2. Commit and push to main
+3. Create a GitHub release with the tag `vX.Y.Z` (e.g., `v0.3.6`)
+4. CI will automatically publish to npm
+
 <!-- /vibe-rules Integration -->
