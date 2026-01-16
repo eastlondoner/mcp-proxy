@@ -1517,6 +1517,14 @@ function registerTools(
           return toolError("Session not found");
         }
 
+        // Track the request
+        const requestId = requestTracker.startRequest(
+          session.sessionId,
+          "codemode_search",
+          query,
+          { args: { type, server: serverPattern, includeSchemas } }
+        );
+
         try {
           const searchQuery: SearchQuery = {
             query,
@@ -1530,9 +1538,19 @@ function registerTools(
             sessionManager,
           });
 
+          // Summarize results for tracking
+          const resultCounts = [
+            results.tools?.length ? `${String(results.tools.length)} tools` : null,
+            results.resources?.length ? `${String(results.resources.length)} resources` : null,
+            results.prompts?.length ? `${String(results.prompts.length)} prompts` : null,
+            results.servers?.length ? `${String(results.servers.length)} servers` : null,
+          ].filter(Boolean).join(", ");
+          requestTracker.completeRequest(requestId, resultCounts || "no results");
+
           return toolJson(results, session);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          requestTracker.failRequest(requestId, message);
           return toolError(`Search failed: ${message}`);
         }
       }
@@ -1574,15 +1592,38 @@ function registerTools(
           return toolError(validationError);
         }
 
+        // Track the request - use code preview as name
+        const codePreview = code.length > 50 ? code.substring(0, 50) + "..." : code;
+        const requestId = requestTracker.startRequest(
+          session.sessionId,
+          "codemode_execute",
+          codePreview.replace(/\n/g, " "),
+          { args: { codeLength: code.length, timeout } }
+        );
+
         try {
           const result = await execute(
             { code, timeout },
             { session, sessionManager }
           );
 
+          // Summarize result for tracking
+          const summary = result.success
+            ? `success (${String(result.stats.durationMs)}ms, ${String(result.stats.mcpCalls)} mcp calls)`
+            : `error: ${result.error?.message ?? "unknown"}`;
+
+          if (result.success) {
+            requestTracker.completeRequest(requestId, summary);
+          } else if (result.error?.message.includes("timed out")) {
+            requestTracker.timeoutRequest(requestId);
+          } else {
+            requestTracker.failRequest(requestId, result.error?.message ?? "unknown error");
+          }
+
           return toolJson(result, session);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          requestTracker.failRequest(requestId, message);
           return toolError(`Execution failed: ${message}`);
         }
       }

@@ -23,7 +23,9 @@ export type RequestType =
   | "prompt_get"
   | "backend_tool"
   | "backend_resource"
-  | "backend_prompt";
+  | "backend_prompt"
+  | "codemode_search"
+  | "codemode_execute";
 
 /**
  * A tracked request
