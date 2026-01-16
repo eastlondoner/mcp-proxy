@@ -46,3 +46,12 @@ export { DEFAULT_SANDBOX_CONFIG } from "./types.js";
 
 // Sandbox execution
 export { createSandboxContext, executeSandbox } from "./sandbox.js";
+
+// API bindings
+export type { CreateSandboxAPIOptions } from "./api-bindings.js";
+export {
+  createSandboxAPI,
+  matchesServerPattern,
+  getMatchingClients,
+  getClient,
+} from "./api-bindings.js";
