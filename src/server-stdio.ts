@@ -132,6 +132,7 @@ interface CliArgs {
   configPath?: string;
   logLevel: "debug" | "info" | "warn" | "error";
   logFile?: string;
+  noCodemode: boolean;
 }
 
 function parseArgs(): CliArgs {
@@ -139,6 +140,8 @@ function parseArgs(): CliArgs {
   let configPath: string | undefined;
   let logLevel: CliArgs["logLevel"] = "info";
   let logFile: string | undefined;
+  // Check env var first, CLI flag can override
+  let noCodemode = process.env["EMCEEPEE_NO_CODEMODE"] === "1";
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -157,10 +160,12 @@ function parseArgs(): CliArgs {
       i++;
     } else if (arg?.startsWith("--log-file=")) {
       logFile = arg.slice("--log-file=".length);
+    } else if (arg === "--no-codemode") {
+      noCodemode = true;
     }
   }
 
-  return { configPath, logLevel, logFile };
+  return { configPath, logLevel, logFile, noCodemode };
 }
 
 function loadConfig(path: string): ProxyConfig {
@@ -1461,7 +1466,7 @@ function registerTools(
 // =============================================================================
 
 async function main(): Promise<void> {
-  const { configPath, logLevel, logFile } = parseArgs();
+  const { configPath, logLevel, logFile, noCodemode } = parseArgs();
 
   // In stdio mode, we can't log to console (that would interfere with the protocol).
   // Use file logging if specified via CLI arg or EMCEEPEE_LOG_DIR env var.
@@ -1583,7 +1588,9 @@ async function main(): Promise<void> {
   logger.info("Session created", { sessionId: activeSession.sessionId });
 
   // Register all tools with a getter for the active session
-  registerTools(mcpServer, sessionManager, () => activeSession);
+  registerTools(mcpServer, sessionManager, () => activeSession, {
+    codemodeEnabled: !noCodemode,
+  });
 
   // Create stdio transport (with optional logging wrapper for debugging)
   const rawTransport = new StdioServerTransport();

@@ -286,8 +286,19 @@ return {
 
 Codemode is enabled by default. To disable:
 
+**CLI flag:**
+```bash
+npx emceepee --no-codemode
+npx emceepee-http --no-codemode
+```
+
+**Environment variable:**
+```bash
+EMCEEPEE_NO_CODEMODE=1 npx emceepee
+```
+
+**Library usage:**
 ```typescript
-// When using emceepee as a library
 registerTools(server, sessionManager, sessions, requestTracker, {
   codemodeEnabled: false
 });

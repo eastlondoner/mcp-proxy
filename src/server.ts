@@ -60,6 +60,7 @@ interface CliArgs {
   configPath?: string;
   port: number;
   logLevel: "debug" | "info" | "warn" | "error";
+  noCodemode: boolean;
 }
 
 function parseArgs(): CliArgs {
@@ -67,6 +68,8 @@ function parseArgs(): CliArgs {
   let configPath: string | undefined;
   let port = Number(process.env["PORT"]) || 8080;
   let logLevel: CliArgs["logLevel"] = "info";
+  // Check env var first, CLI flag can override
+  let noCodemode = process.env["EMCEEPEE_NO_CODEMODE"] === "1";
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -85,10 +88,12 @@ function parseArgs(): CliArgs {
       i++;
     } else if (arg?.startsWith("--log-level=")) {
       logLevel = arg.slice("--log-level=".length) as CliArgs["logLevel"];
+    } else if (arg === "--no-codemode") {
+      noCodemode = true;
     }
   }
 
-  return { configPath, port, logLevel };
+  return { configPath, port, logLevel, noCodemode };
 }
 
 function loadConfig(path: string): ProxyConfig {
@@ -1636,10 +1641,10 @@ function registerTools(
 // =============================================================================
 
 function main(): void {
-  const { configPath, port, logLevel } = parseArgs();
+  const { configPath, port, logLevel, noCodemode } = parseArgs();
   const logger = createConsoleLogger(logLevel);
 
-  logger.info("Starting MCP Proxy Server", { port, configPath });
+  logger.info("Starting MCP Proxy Server", { port, configPath, codemodeEnabled: !noCodemode });
 
   // Create session manager
   // Use long timeout - sessions are typically long-lived dev sessions with Cursor
@@ -1694,7 +1699,9 @@ function main(): void {
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
   // Register all tools
-  registerTools(mcpServer, sessionManager, transportToSession, requestTracker);
+  registerTools(mcpServer, sessionManager, transportToSession, requestTracker, {
+    codemodeEnabled: !noCodemode,
+  });
 
   // Create HTTP server
   const httpServer = createServer((req, res) => {
