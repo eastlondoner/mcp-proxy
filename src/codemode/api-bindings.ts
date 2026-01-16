@@ -88,6 +88,36 @@ function promptToSandbox(server: string, prompt: Prompt): SandboxPromptInfo {
 }
 
 // =============================================================================
+// Status Conversion
+// =============================================================================
+
+/**
+ * Valid status values for SandboxServerInfo
+ */
+type SandboxStatus = SandboxServerInfo["status"];
+
+/**
+ * Convert backend server status to sandbox-compatible status
+ * Maps "not_connected" to "disconnected" since sandbox API doesn't have that value
+ */
+function toSandboxStatus(status: string): SandboxStatus {
+  const validStatuses: SandboxStatus[] = [
+    "connected",
+    "connecting",
+    "disconnected",
+    "reconnecting",
+    "error",
+  ];
+
+  if (validStatuses.includes(status as SandboxStatus)) {
+    return status as SandboxStatus;
+  }
+
+  // Map "not_connected" and any unknown status to "disconnected"
+  return "disconnected";
+}
+
+// =============================================================================
 // Server Pattern Matching
 // =============================================================================
 
@@ -159,6 +189,8 @@ export interface CreateSandboxAPIOptions {
   sessionManager: SessionManager;
   /** Maximum sleep duration in ms (default: 5000) */
   maxSleepMs?: number;
+  /** Array to push warning logs to (e.g., when listing tools fails for a server) */
+  warningLogs?: string[];
 }
 
 /**
@@ -169,8 +201,7 @@ export interface CreateSandboxAPIOptions {
  * converts types to the sandbox-friendly format.
  */
 export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
-  const { session, sessionManager, maxSleepMs = 5000 } = options;
-  const logs: string[] = [];
+  const { session, sessionManager, maxSleepMs = 5000, warningLogs = [] } = options;
 
   return {
     // =========================================================================
@@ -187,7 +218,7 @@ export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
 
         return {
           name: server.name,
-          status: server.status as SandboxServerInfo["status"],
+          status: toSandboxStatus(server.status),
           capabilities: {
             tools: capabilities?.tools ?? false,
             resources: capabilities?.resources ?? false,
@@ -217,7 +248,7 @@ export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
           // Skip servers that fail to list tools
           // This allows partial results when some servers are unavailable
           const message = err instanceof Error ? err.message : String(err);
-          logs.push(`Warning: Failed to list tools from '${name}': ${message}`);
+          warningLogs.push(`Warning: Failed to list tools from '${name}': ${message}`);
         }
       }
 
@@ -233,12 +264,42 @@ export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
       const result = await client.callTool(tool, args);
 
       return {
-        content: result.content.map((item) => ({
-          type: item.type,
-          text: item.type === "text" ? (item as { text: string }).text : undefined,
-          data: item.type === "image" ? (item as { data: string }).data : undefined,
-          mimeType: item.type === "image" ? (item as { mimeType: string }).mimeType : undefined,
-        })),
+        content: result.content.map((item) => {
+          const baseContent: SandboxToolResult["content"][number] = {
+            type: item.type,
+          };
+
+          // Handle text content
+          if (item.type === "text") {
+            baseContent.text = (item as { text: string }).text;
+          }
+
+          // Handle image content
+          if (item.type === "image") {
+            baseContent.data = (item as { data: string }).data;
+            baseContent.mimeType = (item as { mimeType: string }).mimeType;
+          }
+
+          // Handle embedded resource content
+          if (item.type === "resource") {
+            const resourceItem = item as {
+              resource: {
+                uri: string;
+                mimeType?: string;
+                text?: string;
+                blob?: string;
+              };
+            };
+            baseContent.resource = {
+              uri: resourceItem.resource.uri,
+              mimeType: resourceItem.resource.mimeType,
+              text: resourceItem.resource.text,
+              blob: resourceItem.resource.blob,
+            };
+          }
+
+          return baseContent;
+        }),
         isError: result.isError,
       };
     },
@@ -259,7 +320,7 @@ export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          logs.push(`Warning: Failed to list resources from '${name}': ${message}`);
+          warningLogs.push(`Warning: Failed to list resources from '${name}': ${message}`);
         }
       }
 
@@ -280,7 +341,7 @@ export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          logs.push(`Warning: Failed to list resource templates from '${name}': ${message}`);
+          warningLogs.push(`Warning: Failed to list resource templates from '${name}': ${message}`);
         }
       }
 
@@ -320,7 +381,7 @@ export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          logs.push(`Warning: Failed to list prompts from '${name}': ${message}`);
+          warningLogs.push(`Warning: Failed to list prompts from '${name}': ${message}`);
         }
       }
 
@@ -363,6 +424,8 @@ export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
 
     log: (...args: unknown[]): void => {
       // Format and store log message
+      // Note: In sandbox mode, this is overridden by createTrackedAPI
+      // which writes to the execution context logs instead
       const formatted = args
         .map((arg) => {
           if (typeof arg === "string") return arg;
@@ -373,7 +436,7 @@ export function createSandboxAPI(options: CreateSandboxAPIOptions): SandboxAPI {
           }
         })
         .join(" ");
-      logs.push(formatted);
+      warningLogs.push(formatted);
     },
   };
 }

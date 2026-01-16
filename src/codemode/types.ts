@@ -115,9 +115,19 @@ export interface SandboxToolResult {
   /** Content items returned by the tool */
   content: {
     type: string;
+    /** Text content (for type="text") */
     text?: string;
+    /** Base64 image data (for type="image") */
     data?: string;
+    /** MIME type (for type="image" or embedded resource) */
     mimeType?: string;
+    /** Embedded resource (for type="resource") */
+    resource?: {
+      uri: string;
+      mimeType?: string;
+      text?: string;
+      blob?: string;
+    };
   }[];
   /** Whether the tool execution resulted in an error */
   isError?: boolean;

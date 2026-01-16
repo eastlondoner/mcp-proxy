@@ -69,19 +69,28 @@ export async function execute(
   const timeoutMs = clampTimeout(timeout);
 
   // Merge configuration
-  const config: Partial<SandboxConfig> = {
+  const sandboxConfig: Partial<SandboxConfig> = {
     ...configOverride,
     timeoutMs,
   };
+
+  // Create a shared logs array for API warnings
+  // This allows warnings from API operations (e.g., failed server connections)
+  // to be captured and returned in the execution result
+  const warningLogs: string[] = [];
 
   // Create the mcp.* API
   const api = createSandboxAPI({
     session,
     sessionManager,
+    warningLogs,
   });
 
-  // Execute in sandbox
-  const result = await executeSandbox(code, api, config);
+  // Execute in sandbox, passing the warning logs as initial logs
+  const result = await executeSandbox(code, api, {
+    config: sandboxConfig,
+    initialLogs: warningLogs,
+  });
 
   return result;
 }

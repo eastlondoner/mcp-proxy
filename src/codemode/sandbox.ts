@@ -257,14 +257,34 @@ function validateCode(code: string, maxLength: number): void {
 // =============================================================================
 
 /**
- * Create a promise that rejects after a timeout
+ * Result from createTimeoutPromise - includes cleanup function
  */
-function createTimeoutPromise(ms: number): Promise<never> {
-  return new Promise((_, reject) => {
-    setTimeout(() => {
+interface TimeoutPromiseResult {
+  promise: Promise<never>;
+  clear: () => void;
+}
+
+/**
+ * Create a promise that rejects after a timeout
+ * Returns both the promise and a cleanup function to clear the timer
+ */
+function createTimeoutPromise(ms: number): TimeoutPromiseResult {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const promise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
       reject(new Error(`Execution timed out after ${String(ms)}ms`));
     }, ms);
   });
+
+  const clear = (): void => {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+      timeoutId = undefined;
+    }
+  };
+
+  return { promise, clear };
 }
 
 // =============================================================================
@@ -319,18 +339,30 @@ function makeSerializable(value: unknown): unknown {
 // =============================================================================
 
 /**
+ * Options for sandbox execution
+ */
+export interface ExecuteSandboxOptions {
+  /** Sandbox configuration overrides */
+  config?: Partial<SandboxConfig>;
+  /** Initial logs array (e.g., to capture API warnings) */
+  initialLogs?: string[];
+}
+
+/**
  * Execute JavaScript code in an isolated sandbox with the mcp API
  *
  * @param code - JavaScript code to execute
  * @param api - The mcp.* API to expose to the code
- * @param config - Sandbox configuration (timeout, limits)
+ * @param options - Execution options (config, initial logs)
  * @returns Execution result with success/error, return value, logs, and stats
  */
 export async function executeSandbox(
   code: string,
   api: SandboxAPI,
-  config: Partial<SandboxConfig> = {}
+  options: ExecuteSandboxOptions = {}
 ): Promise<SandboxResult> {
+  const { config = {}, initialLogs = [] } = options;
+
   const fullConfig: SandboxConfig = {
     timeoutMs: config.timeoutMs ?? 30000,
     maxMcpCalls: config.maxMcpCalls ?? 100,
@@ -341,7 +373,7 @@ export async function executeSandbox(
   const executionContext: ExecutionContext = {
     mcpCallCount: 0,
     maxMcpCalls: fullConfig.maxMcpCalls,
-    logs: [],
+    logs: [...initialLogs], // Start with any initial logs (e.g., API warnings)
     startTime,
   };
 
@@ -369,22 +401,32 @@ export async function executeSandbox(
 
     // Race against timeout (the vm timeout handles CPU-bound code,
     // but we need this for async code that yields)
-    const result = await Promise.race([
-      resultPromise,
-      createTimeoutPromise(fullConfig.timeoutMs),
-    ]);
+    const timeout = createTimeoutPromise(fullConfig.timeoutMs);
+    try {
+      const result = await Promise.race([
+        resultPromise,
+        timeout.promise,
+      ]);
 
-    const durationMs = Date.now() - startTime;
+      // Clear the timeout timer on success
+      timeout.clear();
 
-    return {
-      success: true,
-      result: makeSerializable(result),
-      logs: executionContext.logs,
-      stats: {
-        durationMs,
-        mcpCalls: executionContext.mcpCallCount,
-      },
-    };
+      const durationMs = Date.now() - startTime;
+
+      return {
+        success: true,
+        result: makeSerializable(result),
+        logs: executionContext.logs,
+        stats: {
+          durationMs,
+          mcpCalls: executionContext.mcpCallCount,
+        },
+      };
+    } catch (error) {
+      // Clear the timeout timer on error too
+      timeout.clear();
+      throw error;
+    }
   } catch (error) {
     const durationMs = Date.now() - startTime;
 
