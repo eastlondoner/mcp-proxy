@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0  # Full history for tags and changelog
 
       - name: Check if version changed
         id: version
@@ -42,8 +42,10 @@ jobs:
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -n "$LAST_TAG" ]; then
             CHANGES=$(git log $LAST_TAG..HEAD --oneline --no-merges | head -20)
+            CHANGELOG_URL="**Full Changelog**: https://github.com/${{ github.repository }}/compare/$LAST_TAG...v$VERSION"
           else
             CHANGES=$(git log --oneline --no-merges -10)
+            CHANGELOG_URL="**First Release**"
           fi
           
           gh release create "v$VERSION" \
@@ -52,4 +54,4 @@ jobs:
 
 $CHANGES
 
-**Full Changelog**: https://github.com/${{ github.repository }}/compare/$LAST_TAG...v$VERSION"
+$CHANGELOG_URL"
